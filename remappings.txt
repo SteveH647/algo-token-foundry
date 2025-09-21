@@ -1,0 +1,3 @@
+@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
+abdk/=lib/abdk-libraries-solidity/ABDKMathQuad/
+forge-std/=lib/forge-std/src/

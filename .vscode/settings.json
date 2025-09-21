@@ -1,0 +1,10 @@
+{
+    "solidity.remappings": [
+        "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+        "abdk/=lib/abdk-libraries-solidity/ABDKMathQuad/",
+        "forge-std/=lib/forge-std/src/"
+    ],
+    "solidity.defaultCompiler": "remote",
+    "solidity.compileUsingRemoteVersion": "v0.8.20+commit.a1b79de6",
+    "editor.formatOnSave": true
+}

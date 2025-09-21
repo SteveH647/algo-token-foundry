@@ -1,0 +1,1295 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "abdk/ABDKMathQuad.sol";
+import "./AlgoBond.sol";
+
+/**
+ * @title AlgoToken
+ * @dev An algorithmic stablecoin that functions as a complete AMM with dual-pool architecture,
+ * dynamic leverage adjustment, and bond mechanisms for supply management.
+ * 
+ * Key Features:
+ * - Dual-pool system (peg pool for stable trades, slip pool for leveraged backing)
+ * - Algorithmic price growth through market cap expansion
+ * - Dynamic parameter adjustment based on market conditions
+ * - Bond system for locking supply and enabling higher leverage
+ * - Bear market discovery mechanism for calibrating growth rates
+ */
+contract AlgoToken is ERC20 {
+
+    // ============================================
+    // LIBRARIES
+    // ============================================
+    
+    // Using 128-bit quadruple precision floating point math for accuracy
+    // This prevents rounding errors that could accumulate over time
+    using ABDKMathQuad for uint256;
+    using ABDKMathQuad for int256;
+    using ABDKMathQuad for bytes16;
+
+    // ============================================
+    // EXTERNAL CONTRACTS
+    // ============================================
+    
+    ERC20 public stableCoin; // The USD-pegged token held in reserves (e.g., USDC, DAI)
+    AlgoBond public algoBond; // NFT bond contract for locking AlgoTokens
+
+    // ============================================
+    // MATHEMATICAL CONSTANTS (bytes16 = quadruple precision float)
+    // ============================================
+    
+    bytes16 f_0 = uint256(0).fromUInt(); // 0.0 as float
+    bytes16 f_1 = uint256(1).fromUInt(); // 1.0 as float
+    bytes16 f_2 = uint256(2).fromUInt(); // 2.0 as float
+    bytes16 f_1_2 = f_1.div(f_2); // 0.5 as float
+    bytes16 f_golden_ratio = 0x3fff9e3779b97f68151235e290029709; // 1.61803398875 (used for bond maturity calculations)
+
+    // ============================================
+    // ERC20 STATE VARIABLES
+    // ============================================
+    
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    // ============================================
+    // PRECISION CONSTANTS FOR CALCULATIONS
+    // ============================================
+    
+    // Smallest amount for floating point calculations (prevents division by zero)
+    // This equals 1/2^64, used as epsilon (a very small value for numerical comparisons
+    // to determine if values are effectively zero rather than exactly zero)
+    bytes16 f_1_div_84467440000000000000 = f_1.div(uint256(84467440000000000000).fromUInt());
+
+    // ============================================
+    // PRICE AND SUPPLY VARIABLES
+    // ============================================
+    
+    /**
+     * @dev Current price of AlgoToken in USD
+     * Starts at $1.00 and can only increase over time
+     */
+    bytes16 public price = f_1; // $1.00 starting price
+    
+    /**
+     * @dev All-time high price - acts as the peg price
+     * Sales execute at this price when peg pool has funds
+     */
+    bytes16 public ATH_price = price;
+    
+    /**
+     * @dev Current circulating supply of AlgoTokens
+     * Increases from buys and bond interest, decreases from sales
+     */
+    uint256 public circ_supply = 0;
+    
+    /**
+     * @dev Highest recorded circulating supply since the last bear market ended
+     * Used to calculate expected supply selloff percentage
+     */
+    uint256 public highest_circ_supply_since_bear_end = circ_supply;
+    
+    /**
+     * @dev Hypothetical supply used for Bancor formula calculations
+     * Represents the supply if all market cap growth went to new tokens
+     * Real supply is split between new tokens (bonds) and price appreciation
+     */
+    uint256 public hypothetical_supply = circ_supply;
+
+    // ============================================
+    // MARKET CAP VARIABLES
+    // ============================================
+    
+    /**
+     * @dev Real market cap = price * circ_supply
+     * The actual value of all circulating tokens
+     */
+    bytes16 public real_Mcap = f_0;
+    
+    /**
+     * @dev Target market cap that real_Mcap approaches over time
+     * Determined by K * slip + peg
+     */
+    bytes16 public target_Mcap = f_0;
+    
+    /**
+     * @dev Idealized market cap based on K_target
+     * Represents what market cap should be with optimal leverage
+     */
+    bytes16 public idealized_Mcap = f_0;
+
+    // ============================================
+    // LEVERAGE CONSTANTS (K VALUES)
+    // ============================================
+    
+    /**
+     * @dev K - Primary leverage constant (Bancor v1)
+     * Determines both:
+     * 1. Backing ratio: Market Cap = K * Reserve
+     * 2. Price slippage severity when trading in slip pool
+     * Higher K = more leverage but more severe slippage
+     */
+    bytes16 public K;
+    
+    /**
+     * @dev K_real - Actual current market leverage
+     * Calculated from real market cap and reserves
+     * Converges toward K over time
+     */
+    bytes16 public K_real = f_1;
+    
+    /**
+     * @dev K_target - Target leverage based on bond lockups
+     * Higher bond participation allows higher K_target
+     * K slowly grows toward K_target
+     */
+    bytes16 public K_target;
+    
+    /**
+     * @dev Kx = max(K_real, Ky)
+     * Used in peg_min calculations (numerator)
+     * Represents the actual leverage that must be defended
+     */
+    bytes16 public Kx;
+    
+    /**
+     * @dev Ky = min(K, K_target)
+     * Used in peg_min calculations (denominator)
+     * Represents the conservative leverage for sizing reserves
+     */
+    bytes16 public Ky;
+
+    // ============================================
+    // SUPPLY SELLOFF EXPECTATIONS
+    // ============================================
+    
+    /**
+     * @dev Expected percentage of supply that might be sold
+     * Calculated as: 1 - (bonds_locked / highest_circ_supply)
+     * Lower values allow higher leverage (K_target)
+     */
+    bytes16 public expected_supply_selloff;
+    
+    /**
+     * @dev Maximum allowed expected_supply_selloff
+     * Safety limit to prevent excessive leverage
+     * Prevents K_target from approaching infinity if expected selloff approaches 100%
+     * Since K_target = sqrt(1/expected_supply_selloff), this cap is essential
+     */
+    bytes16 public max_expected_supply_selloff;
+
+    // ============================================
+    // RESERVE POOLS
+    // ============================================
+    
+    /**
+     * @dev Total USD reserves = slip + peg
+     */
+    uint256 public reserve = 0;
+    
+    /**
+     * @dev Slip pool - Leveraged reserve using Bancor v1
+     * Price slips up/down when trading against this pool
+     */
+    uint256 public slip = 0;
+    
+    /**
+     * @dev Peg pool - 1:1 backed reserve at ATH price
+     * Trades execute at ATH price with zero slippage
+     */
+    uint256 public peg = 0;
+    
+    // Float versions for calculations
+    bytes16 public f_slip = slip.fromUInt();
+    bytes16 public f_peg = peg.fromUInt();
+    bytes16 public f_reserve = reserve.fromUInt();
+
+    // ============================================
+    // PEG POOL MINIMUM THRESHOLDS
+    // ============================================
+    
+    /**
+     * @dev Minimum peg size to handle expected selloff
+     * Below this, the peg could break from normal selling
+     */
+    bytes16 public peg_min_safety = f_0;
+    
+    /**
+     * @dev Target peg size for drainage calculations
+     * Peg pool exponentially drains toward this level
+     */
+    bytes16 public peg_min_drain = f_0;
+    
+    /**
+     * @dev All-time high of (peg - peg_min_safety)
+     * Represents the maximum safety buffer achieved
+     */
+    uint256 public ATH_peg_padding;
+    
+    /**
+     * @dev Target peg size = peg_min_safety + ATH_peg_padding
+     * Bear markets end when peg reaches this level
+     */
+    uint256 public peg_target;
+
+    // ============================================
+    // DEMAND SCORES
+    // ============================================
+    
+    /**
+     * @dev Measures peg strength for bear market calculations
+     * Range: 0 to 1, where 1 = peg at target
+     * Drives the decay rate of bear_estimate when bear_estimate > bear_current
+     * Higher score = faster bear_estimate decays toward bear_current
+     */
+    bytes16 public demand_score_safety = f_0;
+    
+    /**
+     * @dev Determines peg drainage rate from peg pool into slip pool
+     * Higher score = faster drainage allowed
+     * Score = (peg - peg_min_drain) / (peg_target - peg_min_drain)
+     */
+    bytes16 public demand_score_drainage = f_0;
+
+    // ============================================
+    // DRAINAGE PARAMETERS
+    // ============================================
+
+    /**
+     * @dev USD amount in slip pool when price equals ATH
+     * Used to calculate slippage requirements
+     */
+    uint256 public slip_that_reaches_ATH_price = 0;
+
+    // ============================================
+    // BEAR MARKET TRACKING
+    // ============================================
+    
+    /**
+     * @dev Length of the last "major" bear market in blocks
+     * Used to calibrate all time-dependent parameters
+     */
+    bytes16 public bear_actual;
+    
+    /**
+     * @dev Current bear market length in blocks
+     * Increments while peg < peg_target, resets when peg >= peg_target
+     */
+    bytes16 public bear_current;
+    
+    /**
+     * @dev Estimated length of next major bear market
+     * Dynamically adjusts based on market conditions
+     */
+    bytes16 public bear_estimate;
+    
+    // Block tracking for updates
+    uint256 public block_index_of_last_bear_market_update = block.number;
+    uint256 public block_index_of_last_update = block.number;
+    
+    // Time since last update (in blocks)
+    uint256 private t_t0 = block.number - block_index_of_last_update;
+    bytes16 private f_t_t0 = t_t0.fromUInt();
+
+    // ============================================
+    // BOND PARAMETERS
+    // ============================================
+    
+    /**
+     * @dev Minimum blocks between bond sum updates (e.g., 1 month = 219000 blocks)
+     * Prevents excessive gas costs from frequent updates
+     */
+    uint256 public minimum_block_length_between_bondSum_updates;
+    
+    /**
+     * @dev Bond portion at which immediate redemption triggers
+     * E.g., 0.1 = redeem fully when bond decays to 10% of original
+     */
+    bytes16 public bondPortionAtMaturity;
+    
+    /**
+     * @dev Total AlgoTokens locked in bonds
+     * Reduces expected selloff pressure
+     */
+    uint256 public total_algos_locked_in_bonds = 0;
+
+    // ============================================
+    // CONSTRUCTOR
+    // ============================================
+    
+    /**
+     * @param ATH_peg_padding_ Initial reserve padding above minimum safety level
+     * @param bear_current_ Starting bear market length in blocks
+     * @param K_ Initial leverage constant (e.g., 1.2 = 20% leveraged)
+     * @param name_ Token name
+     * @param symbol_ Token symbol
+     * @param algoBond_Name_ Bond NFT name
+     * @param algoBond_Symbol_ Bond NFT symbol
+     * @param stableCoin_contract_address Address of USD stablecoin for reserves
+     * @param bondPortionAtMaturity_ Threshold for bond acceleration
+     * @param minimum_block_length_between_bondSum_updates_ Min blocks between updates
+     */
+    constructor(
+        uint256 ATH_peg_padding_,
+        uint256 bear_current_,
+        bytes16 K_,
+        string memory name_,
+        string memory symbol_,
+        string memory algoBond_Name_,
+        string memory algoBond_Symbol_,
+        address stableCoin_contract_address,
+        bytes16 bondPortionAtMaturity_,
+        uint256 minimum_block_length_between_bondSum_updates_
+    )
+    ERC20 (name_, symbol_) 
+    {
+        // Initialize padding and target
+        ATH_peg_padding = ATH_peg_padding_;
+        peg_target = ATH_peg_padding_;
+
+        // Initialize bear market tracking
+        bear_current = bear_current_.fromUInt();
+        bear_actual = bear_current;
+        bear_estimate = bear_current;
+
+        // Initialize leverage constants
+        K = K_;
+        K_target = K_;
+        Ky = min(K, K_target);
+        Kx = max(K_real, Ky);
+        
+        // Calculate initial expected selloff
+        expected_supply_selloff = f_1.div(Kx.mul(Kx));
+        max_expected_supply_selloff = expected_supply_selloff;
+
+        // Set bond parameters
+        bondPortionAtMaturity = bondPortionAtMaturity_;
+
+        // Deploy bond contract
+        algoBond = new AlgoBond(algoBond_Name_, algoBond_Symbol_, address(this), bondPortionAtMaturity_);
+        
+        // Set stablecoin
+        stableCoin = ERC20(stableCoin_contract_address);
+
+        minimum_block_length_between_bondSum_updates = minimum_block_length_between_bondSum_updates_;
+    }
+
+    // ============================================
+    // ERC20 OVERRIDES
+    // ============================================
+    
+    /**
+     * @dev Override required due to ERC20 implementation bug
+     * Returns the token balance of an account
+     */
+    function balanceOf(address account) public view virtual override returns (uint256) {
+        return _balances[account];
+    }
+
+    function approve(address spender, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, amount);
+        return true;
+    }
+
+    function _approve(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal override {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    function allowance(address owner, address spender) public view override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    // ============================================
+    // MATHEMATICAL HELPER FUNCTIONS
+    // ============================================
+    
+    /**
+     * @dev Calculate y^z using logarithms
+     * Formula: y^z = 2^(z * log_2(y))
+     */
+    function pow(bytes16 y, bytes16 z) private pure returns(bytes16) {
+        bytes16 log_y = y.log_2();
+        bytes16 z_log_y = z.mul(log_y);
+        return z_log_y.pow_2();
+    }
+
+    // Max/min functions for different types
+    function max(uint256 a, uint256 b) private pure returns (uint256) {
+        return a >= b ? a : b;
+    }
+    function min(uint256 a, uint256 b) private pure returns (uint256) {
+        return a <= b ? a : b;
+    }
+    function max(bytes16 a, bytes16 b) private pure returns (bytes16) {
+        return a.cmp(b) >= 0 ? a : b;
+    }
+    function min(bytes16 a, bytes16 b) private pure returns (bytes16) {
+        return a.cmp(b) <= 0 ? a : b;
+    }
+    function max(int256 a, int256 b) private pure returns (int256) {
+        return a >= b ? a : b;
+    }
+    function min(int256 a, int256 b) private pure returns (int256) {
+        return a <= b ? a : b;
+    }
+
+    // ============================================
+    // CORE AMM FUNCTIONS
+    // ============================================
+    
+    /**
+     * @dev Buy AlgoTokens with USD
+     * 
+     * Process:
+     * 1. If price < ATH: USD goes to slip pool, price slips up (Bancor v1)
+     * 2. If price = ATH: USD goes to peg pool, no slippage
+     * 3. Updates bear market tracking if peg_target reached
+     * 4. Adjusts K values based on new market state
+     */
+    function buy(uint $USD_amount) public {
+        uint256 USD_remaining = $USD_amount;
+        uint256 algos_to_mint = 0;
+        bool price_increased = false;
+        
+        // ========== PRICE BELOW ATH - SLIP POOL TRADING ==========
+        if (price.cmp(ATH_price) < 0) {
+            // Price is below ATH, so peg pool must be empty
+            // USD goes into slip pool, causing upward price slippage
+            
+            uint256 new_hyp_supply; // New hypothetical supply after Bancor formula
+            
+            if (USD_remaining < slip_that_reaches_ATH_price - slip) {
+                // Purchase won't reach ATH price
+                // Apply Bancor v1 formula to entire amount
+                
+                uint256 new_slip = slip + USD_remaining;
+                
+                // Bancor v1: S/S0 = (R/R0)^(1/K)
+                // New supply = Old supply * (New reserve / Old reserve)^(1/K)
+                new_hyp_supply = 
+                hypothetical_supply.fromUInt().mul(
+                    pow(
+                        new_slip.fromUInt().div(slip.fromUInt()),
+                        f_1.div(K)
+                    )
+                ).toUInt();
+
+                algos_to_mint = new_hyp_supply - hypothetical_supply;
+                slip = new_slip;
+                price = K.mul(slip.fromUInt()).div(hypothetical_supply.fromUInt()); // P = K * R/S
+                USD_remaining = 0;
+                circ_supply += algos_to_mint;
+            }
+            else {
+                // Purchase will reach ATH price
+                // First, fill slip pool to exact ATH level
+                
+                price = ATH_price;
+                USD_remaining -= slip_that_reaches_ATH_price - slip;
+                
+                new_hyp_supply = 
+                hypothetical_supply.fromUInt().mul(
+                    pow(
+                        slip_that_reaches_ATH_price.fromUInt().div(slip.fromUInt()),
+                        f_1.div(K)
+                    )
+                ).toUInt();
+                
+                slip = slip_that_reaches_ATH_price;
+                algos_to_mint += new_hyp_supply - hypothetical_supply;  
+                circ_supply += algos_to_mint;
+            }
+            
+            reserve = slip;
+            hypothetical_supply = new_hyp_supply;
+            price_increased = true;
+        }
+
+        // ========== PRICE AT ATH - PEG POOL TRADING ==========
+        if (price.cmp(ATH_price) >= 0) {
+            // Price has reached ATH
+            // Remaining USD goes into peg pool with zero slippage
+            
+            peg += USD_remaining;
+            reserve = slip + peg;
+
+            // Update ATH padding if we've exceeded previous highs
+            ATH_peg_padding = uint256(max(
+                int256(max(0, int(peg) - peg_min_safety.toInt())),
+                int256(ATH_peg_padding)
+            ));
+
+            // Mint tokens at ATH price
+            uint256 algos_to_add_to_mint = USD_remaining.fromUInt().div(price).toUInt();
+            algos_to_mint += algos_to_add_to_mint;
+            hypothetical_supply += algos_to_add_to_mint;
+            circ_supply += algos_to_add_to_mint;
+            
+            // Check if bear market has ended
+            uint256 new_peg_target = ATH_peg_padding + peg_min_safety.toUInt();
+            if (new_peg_target > peg_target) {
+                // Bear market has ended!
+                peg_target = new_peg_target;
+                
+                uint256 blocks_since_last_bear_update = block.number - block_index_of_last_bear_market_update;
+                bear_current = bear_current.add(blocks_since_last_bear_update.fromUInt()); 
+
+                // Check if this was a "major" bear market
+                if (bear_current.add(f_1_div_84467440000000000000).cmp(bear_estimate) >= 0) { 
+                    // Update our bear market benchmarks
+                    bear_actual = bear_current;
+                    bear_estimate = bear_current;
+                }
+                
+                // Reset bear market counter
+                bear_current = f_0;
+                highest_circ_supply_since_bear_end = circ_supply;
+                block_index_of_last_bear_market_update = block.number;
+            }
+        }
+
+        // Update highest supply tracker
+        if (circ_supply > highest_circ_supply_since_bear_end) {
+            highest_circ_supply_since_bear_end = circ_supply;
+        }
+
+        // Update all market cap calculations
+        bytes16 f_hyp_supply = hypothetical_supply.fromUInt();
+        bytes16 f_circ_supply = circ_supply.fromUInt();
+        f_slip = slip.fromUInt();
+        f_peg = peg.fromUInt();
+        real_Mcap = price.mul(f_circ_supply);
+        idealized_Mcap = K_target.mul(f_slip).add(f_peg);
+        target_Mcap = price.mul(f_hyp_supply);
+
+        if (price_increased) {
+            // Update K_real based on new market state
+            // K_real = (Market Cap - Peg) / Slip
+            K_real = real_Mcap.sub(f_peg).div(f_slip);
+        }
+
+        update_K_target();
+
+        // Update minimum peg requirements
+        calculate_peg_min_drain();
+        calculate_demand_score_drainage();
+
+        uint $algos_to_mint = algos_to_mint;
+        
+        // Execute the trade
+        stableCoin.transferFrom(_msgSender(), address(this), $USD_amount);
+        _mint(msg.sender, $algos_to_mint);
+    }
+
+    /**
+     * @dev Sell AlgoTokens for USD
+     * 
+     * Process:
+     * 1. If peg pool has funds: Sell at ATH price, deplete peg
+     * 2. If peg pool empty: Sell to slip pool, price slips down
+     * 3. Updates K values based on actual selloff
+     */
+    function sell(uint $algo_amount) public {
+        uint256 algos_remaining = $algo_amount;
+        uint $USD_to_send = 0;
+        bool price_decreased = false;
+
+        // ========== SELL TO PEG POOL FIRST ==========
+        if (peg >= 0) {
+            uint256 algos_to_subtract;
+            uint256 peg_decrease = price.mul(algos_remaining.fromUInt()).toUInt();
+            
+            if (peg_decrease >= peg) {
+                // Deplete entire peg pool
+                $USD_to_send = peg;
+                algos_to_subtract = peg.fromUInt().div(price).toUInt();
+                algos_remaining -= algos_to_subtract;
+                peg = 0;
+                reserve = slip;
+            }
+            else {
+                // Partial peg depletion
+                $USD_to_send = peg_decrease;
+                peg -= $USD_to_send;
+                reserve = peg + slip;
+                algos_to_subtract = algos_remaining;
+                algos_remaining = 0;
+            }
+            
+            circ_supply -= algos_to_subtract;
+            hypothetical_supply -= algos_to_subtract;
+        }
+
+        // ========== SELL TO SLIP POOL IF PEG EMPTY ==========
+        if (peg == 0) {
+            // Apply Bancor v1 formula for downward slippage
+            uint256 new_hyp_supply = hypothetical_supply - algos_remaining;
+
+            // R/R0 = (S/S0)^K
+            uint256 new_slip = slip.fromUInt().mul(
+                pow(
+                    new_hyp_supply.fromUInt().div(hypothetical_supply.fromUInt()),
+                    K
+                )
+            ).toUInt();
+
+            $USD_to_send += slip - new_slip;
+            slip = new_slip;
+            reserve = slip;
+            hypothetical_supply = new_hyp_supply;
+            circ_supply -= algos_remaining;
+            algos_remaining = 0;
+            price = K.mul(reserve.fromUInt().div(hypothetical_supply.fromUInt())); // P = K * R/S
+            price_decreased = true;
+        }
+
+        // Update market caps
+        bytes16 f_hyp_supply = hypothetical_supply.fromUInt();
+        bytes16 f_circ_supply = circ_supply.fromUInt();
+        f_slip = slip.fromUInt();
+        f_peg = peg.fromUInt();
+        real_Mcap = price.mul(f_circ_supply);
+        idealized_Mcap = K_target.mul(f_slip).add(f_peg);
+        target_Mcap = price.mul(f_hyp_supply);
+
+        if (price_decreased) {
+            // Update K_real for new lower price
+            K_real = real_Mcap.div(f_slip);
+        }
+
+        update_K_target();
+
+        // Update peg requirements
+        calculate_peg_min_drain();
+        calculate_demand_score_drainage();
+
+        // Execute the trade
+        _burn(msg.sender, $algo_amount);
+        stableCoin.approve(address(this), $USD_to_send);
+        stableCoin.transferFrom(address(this), msg.sender, $USD_to_send);
+    }
+
+    /**
+     * @dev Main update function - called periodically to update system state
+     * 
+     * Updates:
+     * 1. Drains peg to slip if appropriate
+     * 2. Grows K_real towards K
+     * 3. Adjusts all dynamic parameters
+     * 4. Increments bear market counters
+     */
+    function update() public {
+        t_t0 = block.number - block_index_of_last_update;
+        f_t_t0 = t_t0.fromUInt();
+        f_peg = peg.fromUInt();
+        f_slip = slip.fromUInt();
+        f_reserve = reserve.fromUInt();
+        
+        if (t_t0 > 0 && circ_supply > 0) {
+            // At least 1 block has passed, do the update
+            
+            if (f_peg.cmp(peg_min_safety) > 0) {
+                drain_peg_into_slip();
+            }
+            
+            update_K_target();
+            update_target_Mcap_K_real_and_K();
+            grow_K_real_towards_K();
+            calculate_peg_min_safety_and_peg_target();
+            increment_bear_current_and_manage_bear_estimate_and_bear_actual();
+        }
+    }
+
+    /**
+     * @dev Gradually drains USD from peg pool to slip pool
+     * 
+     * The drainage uses a weighted average mechanism to adapt the rate:
+     * - Vanilla formula: peg approaches peg_min_drain asymptotically
+     * - Modified by W: When W < 1, drainage accelerates as if target were lower
+     * 
+     * Drainage rate depends on demand score and bear market length
+     * Increases the amount of reserves that are leveraged (moves USD from peg to slip)
+     */
+    function drain_peg_into_slip() private {
+        calculate_peg_min_drain();
+
+        uint256 peg0 = peg; // Save initial peg value
+        f_peg = peg.fromUInt();
+
+        calculate_demand_score_drainage();
+
+        // ============================================
+        // WEIGHTED AVERAGE DRAINAGE MECHANISM
+        // ============================================
+        
+        /**
+         * The drainage formula:
+         * peg = peg_min_drain + (peg0 - peg_min_drain) * e^(-(t-t0) / (T*W))
+         * 
+         * Where W is the weighted average that modifies drainage speed:
+         * W = 1 - C * peg_min_drain/peg
+         * 
+         * How W affects drainage:
+         * - W = 1 (vanilla): peg drains toward peg_min_drain normally
+         * - W < 1 (accelerated): peg drains faster, as if target were lower than peg_min_drain
+         * - W much less than 1: peg drains as if target were near zero
+         * 
+         * The economic logic:
+         * - High demand (C near 1): W becomes small, allowing aggressive drainage
+         * - Low demand (C near 0): W approaches 1, preserving capital with vanilla rate
+         */
+        
+        // Calculate weighted average
+        // This is NOT averaging two rates, but rather modifying the vanilla rate
+        // When demand is high, W < 1 accelerates drainage beyond the natural equilibrium
+        bytes16 weighted_average = 
+        f_1.sub(demand_score_drainage.mul(
+            peg_min_drain.div(f_peg)
+        ));
+        
+        /**
+         * Example with numbers:
+         * If peg_min_drain = 730, peg = 900, demand_score = 0.89:
+         * W = 1 - 0.89 * (730/900) = 1 - 0.72 = 0.28
+         * 
+         * This makes T*W much smaller than T, accelerating drainage 3.6x
+         * The peg drains as if aiming for a target well below peg_min_drain
+         */
+
+        // Step size relative to bear market length
+        // CRITICAL: step_size represents the discrete time step as a fraction of bear_estimate
+        // If updates are infrequent (large t-t0), step_size becomes large, which can cause
+        // the demand_score to jump discontinuously rather than decay smoothly
+        // The system expects frequent updates (e.g., daily) to maintain granularity
+        // If we fail to maintain adequate granularity, we use the vanilla formula which omits the weighted_average
+        bytes16 step_size = f_t_t0.div(bear_estimate); 
+
+        bytes16 f_peg_minus_peg_min_drain = f_peg.sub(peg_min_drain);
+        if (f_peg_minus_peg_min_drain.cmp(f_1_div_84467440000000000000) >= 0) {
+            // Peg significantly above minimum, calculate drainage
+            
+            /**
+             * Apply the exponential drainage formula with weighted time constant:
+             * - Vanilla (W=1): peg approaches peg_min_drain
+             * - Modified (W<1): peg drains faster, potentially toward zero
+             * 
+             * The division by weighted_average in the exponent is key:
+             * - Smaller W → larger exponent → faster decay
+             */
+            f_peg = peg_min_drain.add(
+                f_peg.sub(peg_min_drain).div(
+                    step_size.div(weighted_average).exp()
+                )
+            );
+        }
+        
+        bytes16 previous_demand_score_drainage = demand_score_drainage;
+        calculate_demand_score_drainage();
+
+        // Check if drainage rate is too aggressive
+        // This can happen when step_size isn't granular enough to capture the 
+        // continuous change in demand_score_drainage that should occur from drainage.
+        // The demand score naturally decreases as peg drains (since peg is in the numerator),
+        // but if blocks between updates are too large, the discrete jump in demand score
+        // exceeds what natural continuous drainage would have produced.
+        // Example: If 100 blocks pass between updates when the system expects ~10 blocks,
+        // the demand score might drop by 0.1 when continuous drainage would only drop it 0.01
+        if (previous_demand_score_drainage.sub(demand_score_drainage).cmp(step_size) > 0){
+            // Use vanilla exponential decay instead (without weighted_average modification)
+            // This prevents discontinuous jumps in drainage rate that would occur
+            // from using the discretely-calculated demand score
+            // The vanilla formula simply uses e^(-step_size) without the weighted_average acceleration
+            demand_score_drainage = previous_demand_score_drainage.div(step_size.exp());
+            
+            // Calculate peg that corresponds to this smoothed demand score
+            // This ensures peg follows a continuous path rather than jumping
+            f_peg = peg_min_drain.add(
+                demand_score_drainage.mul(peg_target.fromUInt().sub(peg_min_drain))
+            );
+        }
+
+        peg = f_peg.toUInt();
+        if (peg <= peg_min_drain.toUInt()) {
+            // Round to avoid numerical issues
+            f_peg = peg.fromUInt();
+        }
+        
+        // Move drained USD to slip pool
+        uint256 peg_peg0 = peg0 - peg;
+        slip += peg_peg0;
+        f_slip = slip.fromUInt();
+    }
+
+    /**
+     * @dev Grows K_real towards K over time
+     * Creates algorithmic market cap growth and price appreciation
+     * Some of the market cap growth goes to minting new supply for bond holders,
+     * and the rest goes towards price appreciation for all token holders
+     * Rate depends on bear market length and peg status
+     */
+    function grow_K_real_towards_K() private {
+        // Exponential convergence: K_real = K - (K - K_real0) * e^(-(t-t0) / T)
+        
+        bytes16 K_K_real0 = K.sub(K_real);
+        bytes16 t_t0_T = f_t_t0.div(bear_actual);
+        bytes16 e_t_t0_T = t_t0_T.exp();
+        bytes16 K_K_real_0_div_e_t_t0_T = K_K_real0.div(e_t_t0_T);
+        K_real = K.sub(K_K_real_0_div_e_t_t0_T);
+        
+        // Ensure no negative values from rounding
+        f_slip = max(f_slip, f_0);
+        f_peg = max(f_peg, f_0);
+        
+        bytes16 K_real_slip = K_real.mul(f_slip);
+        bytes16 previous_Mcap = real_Mcap;
+        
+        // Calculate new market cap from K_real growth
+        real_Mcap = K_real_slip.add(f_peg);
+        
+        // Market cap gain to be distributed
+        bytes16 market_cap_gain = real_Mcap.sub(previous_Mcap);
+        
+        total_algos_locked_in_bonds = algoBond.getTotalAlgosLockedInBonds();
+        
+        if (total_algos_locked_in_bonds > 0) {
+            // Distribute gains between bond holders and price appreciation
+            
+            // Bond ratio determines portion of market cap gains that goes to 
+            // newly minted supply distributed to bond holders
+            bytes16 bondRatio = total_algos_locked_in_bonds.fromUInt().div(
+                highest_circ_supply_since_bear_end.fromUInt()
+            );
+            
+            // Up to half of proportional gains go to bonds as new supply
+            bytes16 Mcap_to_mint = market_cap_gain.mul(bondRatio).mul(f_1_2);
+            
+            // Mint tokens for bond holders (distributed later)
+            uint256 algos_to_mint = Mcap_to_mint.div(price).toUInt();
+            circ_supply += algos_to_mint;
+            highest_circ_supply_since_bear_end += algos_to_mint;
+            algoBond.addToGainsAccrual(algos_to_mint);
+        }
+        
+        total_algos_locked_in_bonds = algoBond.getTotalAlgosLockedInBonds();
+        
+        // Update price from new market cap
+        // Price always increases because market cap growth > supply growth
+        bytes16 f_circ_supply = circ_supply.fromUInt();
+        price = real_Mcap.div(f_circ_supply);
+        ATH_price = max(price, ATH_price);
+        
+        // Update hypothetical supply
+        hypothetical_supply = target_Mcap.div(price).toUInt();
+    }
+
+    /**
+     * @dev Updates K_target based on bond participation and actual selloff
+     * 
+     * Two drivers:
+     * 1. Bond lockups increase/decrease → K_target increases/decreases respectively
+     *    However, K_target cannot go below K when adjusting due to bond lockups alone
+     * 2. Excessive selling (actual > expected) → K_target forced below K (conservative mode)
+     */
+    function update_K_target() private {
+        // Calculate expected selloff based on bonds
+        total_algos_locked_in_bonds = algoBond.getTotalAlgosLockedInBonds();
+        bytes16 f_highest_circ_supply_since_bear_end = highest_circ_supply_since_bear_end.fromUInt();
+        
+        expected_supply_selloff = f_1.sub(
+            total_algos_locked_in_bonds.fromUInt().div(f_highest_circ_supply_since_bear_end)
+        );
+        
+        // Cap at K-implied selloff
+        bytes16 expected_supply_selloff_as_per_K = f_1.div(pow(K, f_2));
+        expected_supply_selloff = min(expected_supply_selloff, expected_supply_selloff_as_per_K);
+        
+        // Check actual selloff
+        bytes16 actual_supply_selloff = f_1.sub(
+            circ_supply.fromUInt().div(f_highest_circ_supply_since_bear_end)
+        );
+        
+        // If actual worse than expected, update expectations
+        if (actual_supply_selloff.cmp(expected_supply_selloff) > 0) {
+            expected_supply_selloff = actual_supply_selloff;
+        }
+        
+        // Cap at maximum allowed
+        if (expected_supply_selloff.cmp(max_expected_supply_selloff) > 0) {
+            expected_supply_selloff = max_expected_supply_selloff;
+        }
+        
+        // Calculate K_target from selloff expectations
+        // K_target = sqrt(1 / expected_supply_selloff)
+        K_target = f_1.div(expected_supply_selloff).sqrt();
+        
+        idealized_Mcap = K_target.mul(f_slip).add(f_peg);
+    }
+
+    /**
+     * @dev Updates target market cap and K values based on drainage
+     * Handles both growth mode (K_target > K) and conservative mode (K_target < K)
+     */
+    function update_target_Mcap_K_real_and_K() private {
+        if (f_slip.cmp(f_1_div_84467440000000000000) >= 0) {
+            // Update K_real from drainage (K_real decreases as drainage moves USD from peg to slip)
+            bytes16 real_Mcap_peg = real_Mcap.sub(f_peg);
+            if (real_Mcap_peg.cmp(f_1_div_84467440000000000000) >= 0) {
+                K_real = real_Mcap_peg.div(f_slip);
+            }
+            
+            if (K_target.cmp(K) >= 0) {
+                // Growth mode: K grows towards K_target
+                // Formula: K = K_target - (K_target - K0) * e^(-(t-t0) / (bear_actual * K_target/K0))
+                bytes16 f_Kt_minus_K0 = K_target.sub(K);
+                bytes16 f_Ta_Kt_div_K0 = bear_actual.mul(K_target.div(K));
+                bytes16 f_exponent = f_t_t0.div(f_Ta_Kt_div_K0);
+                K = K_target.sub(
+                    f_Kt_minus_K0.div(f_exponent.exp())
+                );
+                
+                // Update target market cap
+                target_Mcap = K.mul(f_slip).add(f_peg);
+            }
+            else {
+                // Conservative mode: K decreases from drainage
+                // Target market cap stays constant
+                bytes16 target_Mcap_peg = target_Mcap.sub(f_peg);
+                if (target_Mcap_peg.cmp(f_1_div_84467440000000000000) >= 0) {
+                    K = target_Mcap_peg.div(f_slip);
+                }
+            }
+        }
+    }
+
+    /**
+     * @dev Calculates minimum safe peg size and target
+     * Updates as drainage changes the slip/peg ratio
+     */
+    function calculate_peg_min_safety_and_peg_target() private {
+        bytes16 tmp_f_slip;
+        
+        if (ATH_price.sub(price).cmp(f_1_div_84467440000000000000) <= 0) {
+            // At ATH price
+            slip_that_reaches_ATH_price = slip;
+            tmp_f_slip = f_slip.cmp(f_1_div_84467440000000000000) >= 0 ? f_slip : f_0;
+        }
+        else {
+            // Below ATH - calculate slip needed to reach it
+            // Uses Bancor formula: R = R0 * (P_ATH/P)^(1/(1-1/K))
+            slip_that_reaches_ATH_price = 
+            f_reserve.mul(
+                pow(
+                    ATH_price.div(price),
+                    f_1.div(f_1.sub(f_1.div(K)))
+                )
+            ).toUInt();
+            
+            tmp_f_slip = slip_that_reaches_ATH_price.fromUInt();
+        }
+        
+        if (tmp_f_slip.cmp(f_1_div_84467440000000000000) >= 0) {
+            // Update Kx and Ky
+            Ky = min(K, K_target);
+            Kx = max(K_real, K_target);
+            
+            // Calculate minimum safe peg size
+            // peg_min_safety = Kx * slip / (Ky^2 - 1)
+            peg_min_safety = Kx.mul(tmp_f_slip).div(Ky.mul(Ky).sub(f_1));
+        }
+        else {
+            peg_min_safety = f_0;
+        }
+        
+        calculate_peg_target();
+    }
+
+    /**
+     * @dev Updates bear market counters and estimates
+     * Tracks current bear length and adjusts estimates of future bears
+     */
+    function increment_bear_current_and_manage_bear_estimate_and_bear_actual() private {
+        uint256 blocks_since_last_bear_update = block.number - block_index_of_last_bear_market_update;
+        
+        // Modulate growth rate by demand when appropriate
+        bytes16 modified_blocks_since_last_bear_update;
+        if (bear_current.cmp(bear_estimate) >= 0) {
+            // Near end of expected bear - slow growth if peg recovering
+            modified_blocks_since_last_bear_update = f_1.sub(demand_score_drainage).mul(
+                blocks_since_last_bear_update.fromUInt()
+            );
+        } else {
+            modified_blocks_since_last_bear_update = blocks_since_last_bear_update.fromUInt();
+        }
+        
+        bear_current = bear_current.add(modified_blocks_since_last_bear_update);
+        
+        if (bear_estimate.cmp(bear_current) >= 0) {
+            // Decay bear_estimate towards bear_current
+            bytes16 f_peg_minus_peg_min_safety = f_peg.sub(peg_min_safety);
+            
+            if (f_peg_minus_peg_min_safety.cmp(f_1_div_84467440000000000000) >= 0
+                && bear_estimate.cmp(f_1_div_84467440000000000000) >= 0) {
+                
+                demand_score_safety = f_peg.sub(peg_min_safety).div(ATH_peg_padding.fromUInt());
+                // Bear estimate decay formula: bear_estimate = bear_estimate0 * e^(-demand_score_safety * (t-t0) / bear_actual)
+                bear_estimate = bear_estimate.mul(
+                    demand_score_safety.neg().mul(f_t_t0).div(bear_actual).exp()
+                );
+                
+                if (bear_estimate.cmp(bear_current) <= 0) {
+                    bear_estimate = bear_current;
+                }
+            }
+            else {
+                demand_score_safety = f_0;
+            }
+        }
+        else {
+            // Bear longer than expected - update estimates
+            if (bear_current.cmp(bear_estimate) > 0) {
+                bear_estimate = bear_current;
+            }
+            if (bear_current.cmp(bear_actual) >= 0) {
+                bear_actual = bear_current;
+            }
+        }
+        
+        block_index_of_last_bear_market_update = block.number;
+        block_index_of_last_update = block.number;
+    }
+
+    /**
+     * @dev Calculates demand score for drainage rate
+     * Higher score = more aggressive drainage allowed
+     */
+    function calculate_demand_score_drainage() private {
+        bytes16 f_peg_minus_peg_min_drain = f_peg.sub(peg_min_drain);
+        
+        if (f_peg_minus_peg_min_drain.cmp(f_1_div_84467440000000000000) >= 0) {
+            // Calculate score: (peg - peg_min) / (peg_target - peg_min)
+            demand_score_drainage = 
+            f_peg_minus_peg_min_drain.div(
+                peg_target.fromUInt().sub(peg_min_drain)
+            );
+        }
+        else {
+            demand_score_drainage = f_0;
+        }
+    }
+
+    /**
+     * @dev Calculates the equilibrium peg size for drainage
+     * Peg exponentially approaches this level
+     */
+    function calculate_peg_min_drain() private {
+        f_reserve = reserve.fromUInt();
+        Ky = min(K, K_target);
+        Kx = max(K_real, Ky);
+        bytes16 Kx_reserve = Kx.mul(f_reserve);
+        
+        // peg_min_drain = Kx * reserve / (Ky^2 + Kx - 1)
+        bytes16 Kt_Kt = Ky.mul(Ky);
+        bytes16 Kt2_Kx_1 = Kt_Kt.add(Kx).sub(f_1);
+        peg_min_drain = Kx_reserve.div(Kt2_Kx_1);
+    }
+
+    /**
+     * @dev Updates peg_target based on minimum safety and padding
+     */
+    function calculate_peg_target() private {
+        uint256 i_peg_min_safety = peg_min_safety.toUInt();
+        peg_target = max(peg, i_peg_min_safety + ATH_peg_padding);
+        ATH_peg_padding = peg_target - i_peg_min_safety;
+    }
+
+    // ============================================
+    // VIEW FUNCTIONS
+    // ============================================
+    
+    function totalSupply() public view virtual override returns (uint256) {
+        return circ_supply;
+    }
+
+    // ============================================
+    // INTERNAL TOKEN FUNCTIONS
+    // ============================================
+    
+    function _mint(address account, uint256 amount) virtual internal override {
+        require(account != address(0), "ERC20: mint to the zero address");
+
+        _beforeTokenTransfer(address(0), account, amount);
+
+        unchecked {
+            _balances[account] += amount;
+        }
+        emit Transfer(address(0), account, amount);
+
+        _afterTokenTransfer(address(0), account, amount);
+    }
+
+    function _burn(address account, uint256 amount) internal virtual override {
+        require(account != address(0), "ERC20: burn from the zero address");
+
+        _beforeTokenTransfer(account, address(0), amount);
+
+        uint256 accountBalance = _balances[account];
+        require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
+        unchecked {
+            _balances[account] = accountBalance - amount;
+        }
+
+        emit Transfer(account, address(0), amount);
+
+        _afterTokenTransfer(account, address(0), amount);
+    }
+
+    function _transfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal override {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+
+        _beforeTokenTransfer(from, to, amount);
+
+        uint256 fromBalance = _balances[from];
+        require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
+        unchecked {
+            _balances[from] = fromBalance - amount;
+            _balances[to] += amount;
+        }
+
+        emit Transfer(from, to, amount);
+
+        _afterTokenTransfer(from, to, amount);
+    }
+
+    // ============================================
+    // BOND FUNCTIONS
+    // ============================================
+    
+    /**
+     * @dev Buy a bond by locking AlgoTokens
+     * @param algoAmount Amount of AlgoTokens to lock
+     * @param bondType Type of bond (DECAY, GAINSONLY, or REINVEST)
+     */
+    function buyBond(uint256 algoAmount, AlgoBond.BondReturnsOption bondType) public {
+        transferFrom(msg.sender, address(this), algoAmount);
+        algoBond.mint(msg.sender, algoAmount, bondType);
+        update_K_target();
+    }
+
+    /**
+     * @dev Add more AlgoTokens to an existing bond
+     * @param algoAmount Amount to add
+     * @param tokenId Bond NFT ID
+     */
+    function addToBond(uint256 algoAmount, uint256 tokenId) public {
+        uint256 algosToPayOut = algoBond.addToBond(tokenId, algoAmount);
+        
+        int256 netAlgosToPayOut = int256(algoAmount) - int256(algosToPayOut);
+        
+        if (netAlgosToPayOut > 0) {
+            transferFrom(address(this), msg.sender, uint256(netAlgosToPayOut));
+        }
+        else if (netAlgosToPayOut < 0) {
+            transferFrom(msg.sender, address(this), uint256(-netAlgosToPayOut));
+        }
+        
+        update_K_target();
+    }
+
+    /**
+     * @dev Update a bond to claim accumulated gains
+     * @param tokenId Bond NFT ID
+     */
+    function updateBond(uint256 tokenId) public {
+        require(msg.sender == algoBond.ownerOf(tokenId));
+        
+        uint256 algosToPayOut = algoBond.updateBond(tokenId);
+        
+        if (algosToPayOut > 0) {
+            transfer(msg.sender, algosToPayOut);
+        }
+        
+        update_K_target();
+    }
+
+    /**
+     * @dev Change bond type (DECAY, GAINSONLY, REINVEST)
+     * @param tokenId Bond NFT ID
+     * @param bondType New bond type
+     */
+    function ChangeBondType(uint256 tokenId, AlgoBond.BondReturnsOption bondType) public {
+        require(msg.sender == algoBond.ownerOf(tokenId));
+        
+        uint256 algosToPayOut = algoBond.ChangeBondType(tokenId, bondType);
+        
+        if (algosToPayOut > 0) {
+            transfer(msg.sender, algosToPayOut);
+        }
+        
+        update_K_target();
+    }
+
+    /**
+     * @dev Update all bond sums - distributes accumulated gains
+     * Can only be called after minimum block delay
+     */
+    function updateBondSums() public {
+        // Set maturity timespan based on bear market length
+        algoBond.setMaturityTimeSpan(f_golden_ratio.mul(bear_actual));
+        
+        // Distribute gains to bond holders
+        algoBond.updateBondSums();
+        
+        update_K_target();
+    }
+
+    // ============================================
+    // GETTER FUNCTIONS
+    // ============================================
+    
+    function getBondReturnsOption_Decay() public view returns (AlgoBond.BondReturnsOption) {
+        return AlgoBond.BondReturnsOption.DECAY;
+    }
+
+    function getBondReturnsOption_GainsOnly() public view returns (AlgoBond.BondReturnsOption) {
+        return AlgoBond.BondReturnsOption.GAINSONLY;
+    }
+
+    function getBondReturnsOption_Reinvest() public view returns (AlgoBond.BondReturnsOption) {
+        return AlgoBond.BondReturnsOption.REINVEST;
+    }
+
+    function getMaturityTimeSpan() public view returns (bytes16) {
+        return algoBond.maturityTimeSpan();
+    }
+
+    function _bDelayedSum() public view returns (uint256) {
+        return algoBond._bDelayedSum();
+    }
+
+    function _bDelayedDecaySum() public view returns (uint256) {
+        return algoBond._bDelayedDecaySum();
+    }
+
+    function _bDelayedGainsOnlySum() public view returns (uint256) {
+        return algoBond._bDelayedGainsOnlySum();
+    }
+
+    function _bDelayedReinvestSum() public view returns (uint256) {
+        return algoBond._bDelayedReinvestSum();
+    }
+}
