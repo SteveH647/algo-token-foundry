@@ -3,6 +3,9 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "abdk/ABDKMathQuad.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
+
 
 /**
  * @title AlgoBond
@@ -554,5 +557,12 @@ contract AlgoBond is ERC721 {
      */
     function getTotalAlgosLockedInBonds() public view returns (uint256) {
         return _bSum[_bSum.length - 1] + _bDelayedSum + bGainsAccrual;
+    }
+
+    /**
+     * @dev Returns whether `tokenId` exists.
+     */
+    function _exists(uint256 tokenId) internal view returns (bool) {
+        return _owners[tokenId] != address(0);
     }
 }

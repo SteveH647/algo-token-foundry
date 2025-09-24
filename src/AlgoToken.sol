@@ -393,17 +393,17 @@ contract AlgoToken is ERC20 {
         return true;
     }
 
-    function _approve(
-        address owner,
-        address spender,
-        uint256 amount
-    ) internal override {
-        require(owner != address(0), "ERC20: approve from the zero address");
-        require(spender != address(0), "ERC20: approve to the zero address");
+    // function _approve(
+    //     address owner,
+    //     address spender,
+    //     uint256 amount
+    // ) internal override {
+    //     require(owner != address(0), "ERC20: approve from the zero address");
+    //     require(spender != address(0), "ERC20: approve to the zero address");
 
-        _allowances[owner][spender] = amount;
-        emit Approval(owner, spender, amount);
-    }
+    //     _allowances[owner][spender] = amount;
+    //     emit Approval(owner, spender, amount);
+    // }
 
     function allowance(address owner, address spender) public view override returns (uint256) {
         return _allowances[owner][spender];
@@ -456,8 +456,11 @@ contract AlgoToken is ERC20 {
      * 3. Updates bear market tracking if peg_target reached
      * 4. Adjusts K values based on new market state
      */
-    function buy(uint $USD_amount) public {
-        uint256 USD_remaining = $USD_amount;
+    function buy(uint USD_amount) public {
+        // Transfer will revert if user doesn't have funds or allowance
+        stableCoin.transferFrom(msg.sender, address(this), USD_amount);
+
+        uint256 USD_remaining = USD_amount;
         uint256 algos_to_mint = 0;
         bool price_increased = false;
         
@@ -583,12 +586,9 @@ contract AlgoToken is ERC20 {
         // Update minimum peg requirements
         calculate_peg_min_drain();
         calculate_demand_score_drainage();
-
-        uint $algos_to_mint = algos_to_mint;
         
-        // Execute the trade
-        stableCoin.transferFrom(_msgSender(), address(this), $USD_amount);
-        _mint(msg.sender, $algos_to_mint);
+        // Complete the trade
+        _mint(msg.sender, algos_to_mint);
     }
 
     /**
@@ -599,9 +599,12 @@ contract AlgoToken is ERC20 {
      * 2. If peg pool empty: Sell to slip pool, price slips down
      * 3. Updates K values based on actual selloff
      */
-    function sell(uint $algo_amount) public {
-        uint256 algos_remaining = $algo_amount;
-        uint $USD_to_send = 0;
+    function sell(uint algo_amount) public {
+        // Transfer will revert if user doesn't have required token balance or allowance
+        _burn(msg.sender, algo_amount);
+
+        uint256 algos_remaining = algo_amount;
+        uint USD_to_send = 0;
         bool price_decreased = false;
 
         // ========== SELL TO PEG POOL FIRST ==========
@@ -611,7 +614,7 @@ contract AlgoToken is ERC20 {
             
             if (peg_decrease >= peg) {
                 // Deplete entire peg pool
-                $USD_to_send = peg;
+                USD_to_send = peg;
                 algos_to_subtract = peg.fromUInt().div(price).toUInt();
                 algos_remaining -= algos_to_subtract;
                 peg = 0;
@@ -619,8 +622,8 @@ contract AlgoToken is ERC20 {
             }
             else {
                 // Partial peg depletion
-                $USD_to_send = peg_decrease;
-                peg -= $USD_to_send;
+                USD_to_send = peg_decrease;
+                peg -= USD_to_send;
                 reserve = peg + slip;
                 algos_to_subtract = algos_remaining;
                 algos_remaining = 0;
@@ -643,7 +646,7 @@ contract AlgoToken is ERC20 {
                 )
             ).toUInt();
 
-            $USD_to_send += slip - new_slip;
+            USD_to_send += slip - new_slip;
             slip = new_slip;
             reserve = slip;
             hypothetical_supply = new_hyp_supply;
@@ -673,10 +676,9 @@ contract AlgoToken is ERC20 {
         calculate_peg_min_drain();
         calculate_demand_score_drainage();
 
-        // Execute the trade
-        _burn(msg.sender, $algo_amount);
-        stableCoin.approve(address(this), $USD_to_send);
-        stableCoin.transferFrom(address(this), msg.sender, $USD_to_send);
+        // Complete the trade
+        stableCoin.approve(address(this), USD_to_send);
+        stableCoin.transferFrom(address(this), msg.sender, USD_to_send);
     }
 
     /**
@@ -1123,57 +1125,76 @@ contract AlgoToken is ERC20 {
     // ============================================
     // INTERNAL TOKEN FUNCTIONS
     // ============================================
+
+    // function _mint(address account, uint256 amount) virtual internal override {
+    //     require(account != address(0), "ERC20: mint to the zero address");
+
+    //     _beforeTokenTransfer(address(0), account, amount);
+
+    //     unchecked {
+    //         _balances[account] += amount;
+    //     }
+    //     emit Transfer(address(0), account, amount);
+
+    //     _afterTokenTransfer(address(0), account, amount);
+    // }
+
+    // function _burn(address account, uint256 amount) internal virtual override {
+    //     require(account != address(0), "ERC20: burn from the zero address");
+
+    //     _beforeTokenTransfer(account, address(0), amount);
+
+    //     uint256 accountBalance = _balances[account];
+    //     require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
+    //     unchecked {
+    //         _balances[account] = accountBalance - amount;
+    //     }
+
+    //     emit Transfer(account, address(0), amount);
+
+    //     _afterTokenTransfer(account, address(0), amount);
+    // }
+
+    // function _transfer(
+    //     address from,
+    //     address to,
+    //     uint256 amount
+    // ) internal override {
+    //     require(from != address(0), "ERC20: transfer from the zero address");
+    //     require(to != address(0), "ERC20: transfer to the zero address");
+
+    //     _beforeTokenTransfer(from, to, amount);
+
+    //     uint256 fromBalance = _balances[from];
+    //     require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
+    //     unchecked {
+    //         _balances[from] = fromBalance - amount;
+    //         _balances[to] += amount;
+    //     }
+
+    //     emit Transfer(from, to, amount);
+
+    //     _afterTokenTransfer(from, to, amount);
+    // }
+
+    // function _mint(address account, uint256 amount) internal virtual override {
+    // require(account != address(0), "ERC20: mint to the zero address");
     
-    function _mint(address account, uint256 amount) virtual internal override {
-        require(account != address(0), "ERC20: mint to the zero address");
+    //     _update(address(0), account, amount);
+    // }
 
-        _beforeTokenTransfer(address(0), account, amount);
+    // function _burn(address account, uint256 amount) internal virtual override {
+    //     require(account != address(0), "ERC20: burn from the zero address");
+        
+    //     _update(account, address(0), amount);
+    // }
 
-        unchecked {
-            _balances[account] += amount;
-        }
-        emit Transfer(address(0), account, amount);
-
-        _afterTokenTransfer(address(0), account, amount);
-    }
-
-    function _burn(address account, uint256 amount) internal virtual override {
-        require(account != address(0), "ERC20: burn from the zero address");
-
-        _beforeTokenTransfer(account, address(0), amount);
-
-        uint256 accountBalance = _balances[account];
-        require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
-        unchecked {
-            _balances[account] = accountBalance - amount;
-        }
-
-        emit Transfer(account, address(0), amount);
-
-        _afterTokenTransfer(account, address(0), amount);
-    }
-
-    function _transfer(
-        address from,
-        address to,
-        uint256 amount
-    ) internal override {
-        require(from != address(0), "ERC20: transfer from the zero address");
-        require(to != address(0), "ERC20: transfer to the zero address");
-
-        _beforeTokenTransfer(from, to, amount);
-
-        uint256 fromBalance = _balances[from];
-        require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
-        unchecked {
-            _balances[from] = fromBalance - amount;
-            _balances[to] += amount;
-        }
-
-        emit Transfer(from, to, amount);
-
-        _afterTokenTransfer(from, to, amount);
-    }
+    // function _transfer(address from, address to, uint256 amount) internal override {
+    //     require(from != address(0), "ERC20: transfer from the zero address");
+    //     require(to != address(0), "ERC20: transfer to the zero address");
+        
+    //     _update(from, to, amount);
+    // }
 
     // ============================================
     // BOND FUNCTIONS
@@ -1196,8 +1217,8 @@ contract AlgoToken is ERC20 {
      * @param tokenId Bond NFT ID
      */
     function addToBond(uint256 algoAmount, uint256 tokenId) public {
+        transferFrom(msg.sender, address(this), algoAmount);
         uint256 algosToPayOut = algoBond.addToBond(tokenId, algoAmount);
-        
         int256 netAlgosToPayOut = int256(algoAmount) - int256(algosToPayOut);
         
         if (netAlgosToPayOut > 0) {
