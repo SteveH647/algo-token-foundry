@@ -234,14 +234,54 @@ contract AlgoTokenTest is Test {
         assertTrue(reserve == algoToken.reserve(), "Invariant failed: reserve != algoToken.reserve()");
 
         // real_Mcap = price * circ_supply
-        // target_Mcap = price * hyp_supply
         bytes16 price = algoToken.price();
-        if (hyp_supply > 0) {
-            bytes16 calculated_price = K.mul(f_reserve).div(hyp_supply.fromUInt());
-            assertTrue(
-                abs(calculated_price.sub(price)).cmp(f_1_div_18446744073709551616) <=0,
-                "Invariant failed: price != K * f_reserve / hyp_supply"
-            );
+        bytes16 real_Mcap = algoToken.real_Mcap();
+        bytes16 f_circ_supply = algoToken.f_circ_supply();
+        bytes16 real_Mcap_calculated = price.mul(f_circ_supply);
+        assertTrue(
+            abs(real_Mcap.sub(real_Mcap_calculated)).cmp(f_1_div_18446744073709551616) <=0,
+            "Invariant failed: real_Mcap != price * circ_supply"
+        );
+
+        // target_Mcap = price * hyp_supply
+        bytes16 target_Mcap = algoToken.target_Mcap();
+        bytes16 f_hyp_supply = algoToken.f_hyp_supply();
+        bytes16 target_Mcap_calculated = price.mul(f_hyp_supply);
+        assertTrue(
+            abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_1_div_18446744073709551616) <=0,
+            "Invariant failed: target_Mcap != price * hyp_supply"
+        );
+
+        // real_Mcap = K_real * slip + peg
+        bytes16 K_real = algoToken.K_real();
+        real_Mcap_calculated = K_real.mul(f_slip).add(f_peg);
+        assertTrue(
+            abs(real_Mcap.sub(real_Mcap_calculated)).cmp(f_1_div_18446744073709551616) <=0,
+            "Invariant failed: real_Mcap != K_real * slip + peg"
+        );
+
+        // target_Mcap = K * slip + peg
+        target_Mcap_calculated = K.mul(f_slip).add(f_peg);
+        assertTrue(
+            abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_1_div_18446744073709551616) <=0,
+            "Invariant failed: real_Mcap != K * slip + peg"
+        );
+
+        if (peg == 0) {
+            // Then price = K * reserve / hyp_supply = K_real * reserve / circ_supply
+            if (hyp_supply > 0) {
+                bytes16 calculated_price = K.mul(f_reserve).div(f_hyp_supply);
+                assertTrue(
+                    abs(calculated_price.sub(price)).cmp(f_1_div_18446744073709551616) <=0,
+                    "Invariant failed: price != K * reserve / hyp_supply"
+                );
+
+                calculated_price = K_real.mul(f_reserve).div(f_circ_supply);
+                assertTrue(
+                    abs(calculated_price.sub(price)).cmp(f_1_div_18446744073709551616) <=0,
+                    "Invariant failed: price != K_real * reserve / hyp_supply"
+                );
+            }
         }
 
 

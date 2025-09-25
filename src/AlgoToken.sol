@@ -53,6 +53,7 @@ contract AlgoToken is ERC20 {
     
     mapping(address => uint256) private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
+    bytes16 supply_normalization_factor = uint256(10**decimals()).fromUInt();
 
     // ============================================
     // PRECISION CONSTANTS FOR CALCULATIONS
@@ -69,7 +70,6 @@ contract AlgoToken is ERC20 {
     
     /**
      * @dev Current price of AlgoToken in USD
-     * Starts at $1.00 and can only increase over time
      */
     bytes16 public price;
     
@@ -97,6 +97,10 @@ contract AlgoToken is ERC20 {
      * Real supply is split between new tokens (bonds) and price appreciation
      */
     uint256 public hypothetical_supply = circ_supply;
+
+    // float versions for calculations
+    bytes16 public f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
+    bytes16 public f_circ_supply = circ_supply.fromUInt().div(supply_normalization_factor);
 
     // ============================================
     // MARKET CAP VARIABLES
@@ -498,7 +502,9 @@ contract AlgoToken is ERC20 {
 
                 algos_to_mint = new_hyp_supply - hypothetical_supply;
                 slip = new_slip;
-                price = K.mul(slip.fromUInt()).div(hypothetical_supply.fromUInt()); // P = K * R/S
+                f_slip = slip.fromUInt();
+                f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
+                price = K.mul(f_slip).div(f_hyp_supply); // P = K * R/S
                 USD_remaining = 0;
                 circ_supply += algos_to_mint;
             }
@@ -528,7 +534,9 @@ contract AlgoToken is ERC20 {
         }
 
         // ========== PRICE AT ATH - PEG POOL TRADING ==========
+        console.log("ATH_price before price.cmp(ATH_price)", ATH_price.toUInt());
         if (price.cmp(ATH_price) >= 0) {
+            console.log("price.cmp(ATH_price) >= 0");
             // Price has reached ATH
             // Remaining USD goes into peg pool with zero slippage
             
@@ -542,9 +550,13 @@ contract AlgoToken is ERC20 {
             ));
 
             // Mint tokens at ATH price
-            uint256 algos_to_add_to_mint = USD_remaining.fromUInt().div(price).toUInt();
+            console.log("USD_remaining:", USD_remaining);
+            uint256 algos_to_add_to_mint = USD_remaining.fromUInt().div(price).mul(supply_normalization_factor).toUInt();
+            console.log("algos_to_add_to_mint:", algos_to_add_to_mint);
             algos_to_mint += algos_to_add_to_mint;
+            console.log("hypothetical_supply before adding algos_to_add_to_mint:", hypothetical_supply);
             hypothetical_supply += algos_to_add_to_mint;
+            console.log("hypothetical_supply after adding algos_to_add_to_mint:", hypothetical_supply);
             circ_supply += algos_to_add_to_mint;
             
             // Check if bear market has ended
@@ -576,8 +588,8 @@ contract AlgoToken is ERC20 {
         }
 
         // Update all market cap calculations
-        bytes16 f_hyp_supply = hypothetical_supply.fromUInt();
-        bytes16 f_circ_supply = circ_supply.fromUInt();
+        f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
+        f_circ_supply = circ_supply.fromUInt().div(supply_normalization_factor);
         f_slip = slip.fromUInt();
         f_peg = peg.fromUInt();
         real_Mcap = price.mul(f_circ_supply);
@@ -623,12 +635,12 @@ contract AlgoToken is ERC20 {
         // ========== SELL TO PEG POOL FIRST ==========
         if (peg >= 0) {
             uint256 algos_to_subtract;
-            uint256 peg_decrease = price.mul(algos_remaining.fromUInt()).toUInt();
+            uint256 peg_decrease = price.mul(algos_remaining.fromUInt()).div(supply_normalization_factor).toUInt();
             
             if (peg_decrease >= peg) {
                 // Deplete entire peg pool
                 USD_to_send = peg;
-                algos_to_subtract = peg.fromUInt().div(price).toUInt();
+                algos_to_subtract = peg.fromUInt().div(price).mul(supply_normalization_factor).toUInt();
                 algos_remaining -= algos_to_subtract;
                 peg = 0;
                 reserve = slip;
@@ -665,13 +677,15 @@ contract AlgoToken is ERC20 {
             hypothetical_supply = new_hyp_supply;
             circ_supply -= algos_remaining;
             algos_remaining = 0;
-            price = K.mul(reserve.fromUInt().div(hypothetical_supply.fromUInt())); // P = K * R/S
+            f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
+            f_reserve = reserve.fromUInt();
+            price = K.mul(f_reserve.div(f_hyp_supply)); // P = K * R/S
             price_decreased = true;
         }
 
         // Update market caps
-        bytes16 f_hyp_supply = hypothetical_supply.fromUInt();
-        bytes16 f_circ_supply = circ_supply.fromUInt();
+        f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
+        f_circ_supply = circ_supply.fromUInt().div(supply_normalization_factor);
         f_slip = slip.fromUInt();
         f_peg = peg.fromUInt();
         real_Mcap = price.mul(f_circ_supply);
@@ -899,7 +913,7 @@ contract AlgoToken is ERC20 {
             bytes16 Mcap_to_mint = market_cap_gain.mul(bondRatio).mul(f_1_2);
             
             // Mint tokens for bond holders (distributed later)
-            uint256 algos_to_mint = Mcap_to_mint.div(price).toUInt();
+            uint256 algos_to_mint = Mcap_to_mint.div(price).mul(supply_normalization_factor).toUInt();
             circ_supply += algos_to_mint;
             highest_circ_supply_since_bear_end += algos_to_mint;
             algoBond.addToGainsAccrual(algos_to_mint);
@@ -909,12 +923,13 @@ contract AlgoToken is ERC20 {
         
         // Update price from new market cap
         // Price always increases because market cap growth > supply growth
-        bytes16 f_circ_supply = circ_supply.fromUInt();
+        f_circ_supply = circ_supply.fromUInt().div(supply_normalization_factor);
         price = real_Mcap.div(f_circ_supply);
         ATH_price = max(price, ATH_price);
         
         // Update hypothetical supply
-        hypothetical_supply = target_Mcap.div(price).toUInt();
+        f_hyp_supply = target_Mcap.div(price);
+        hypothetical_supply = f_hyp_supply.mul(supply_normalization_factor).toUInt();
     }
 
     /**
@@ -1173,80 +1188,6 @@ contract AlgoToken is ERC20 {
     function totalSupply() public view virtual override returns (uint256) {
         return circ_supply;
     }
-
-    // ============================================
-    // INTERNAL TOKEN FUNCTIONS
-    // ============================================
-
-    // function _mint(address account, uint256 amount) virtual internal override {
-    //     require(account != address(0), "ERC20: mint to the zero address");
-
-    //     _beforeTokenTransfer(address(0), account, amount);
-
-    //     unchecked {
-    //         _balances[account] += amount;
-    //     }
-    //     emit Transfer(address(0), account, amount);
-
-    //     _afterTokenTransfer(address(0), account, amount);
-    // }
-
-    // function _burn(address account, uint256 amount) internal virtual override {
-    //     require(account != address(0), "ERC20: burn from the zero address");
-
-    //     _beforeTokenTransfer(account, address(0), amount);
-
-    //     uint256 accountBalance = _balances[account];
-    //     require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
-    //     unchecked {
-    //         _balances[account] = accountBalance - amount;
-    //     }
-
-    //     emit Transfer(account, address(0), amount);
-
-    //     _afterTokenTransfer(account, address(0), amount);
-    // }
-
-    // function _transfer(
-    //     address from,
-    //     address to,
-    //     uint256 amount
-    // ) internal override {
-    //     require(from != address(0), "ERC20: transfer from the zero address");
-    //     require(to != address(0), "ERC20: transfer to the zero address");
-
-    //     _beforeTokenTransfer(from, to, amount);
-
-    //     uint256 fromBalance = _balances[from];
-    //     require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
-    //     unchecked {
-    //         _balances[from] = fromBalance - amount;
-    //         _balances[to] += amount;
-    //     }
-
-    //     emit Transfer(from, to, amount);
-
-    //     _afterTokenTransfer(from, to, amount);
-    // }
-
-    // function _mint(address account, uint256 amount) internal virtual override {
-    // require(account != address(0), "ERC20: mint to the zero address");
-    
-    //     _update(address(0), account, amount);
-    // }
-
-    // function _burn(address account, uint256 amount) internal virtual override {
-    //     require(account != address(0), "ERC20: burn from the zero address");
-        
-    //     _update(account, address(0), amount);
-    // }
-
-    // function _transfer(address from, address to, uint256 amount) internal override {
-    //     require(from != address(0), "ERC20: transfer from the zero address");
-    //     require(to != address(0), "ERC20: transfer to the zero address");
-        
-    //     _update(from, to, amount);
-    // }
 
     // ============================================
     // BOND FUNCTIONS
