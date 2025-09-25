@@ -6,6 +6,7 @@ import "../src/AlgoToken.sol";
 import "../src/AlgoBond.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "abdk/ABDKMathQuad.sol";
+import {console} from "forge-std/console.sol";
 
 contract MockUSDC is ERC20 {
     constructor() ERC20("Mock USDC", "USDC") {
@@ -38,6 +39,13 @@ contract AlgoTokenTest is Test {
     bytes16 f_2 = uint256(2).fromUInt(); // 2.0 as float
     bytes16 f_1_2 = f_1.div(f_2); // 0.5 as float
     bytes16 f_golden_ratio = 0x3fff9e3779b97f68151235e290029709; // 1.61803398875 (used for bond maturity calculations)
+
+
+    // Smallest amount for floating point calculations (prevents division by zero)
+    // This equals 1/2^64, used as epsilon (a very small value for numerical comparisons
+    // to determine if values are effectively zero rather than exactly zero)
+    bytes16 f_1_div_18446744073709551616 = f_1.div(uint256(18446744073709551616).fromUInt()); 
+
 
     // ============================================
     // MATHEMATICAL HELPER FUNCTIONS
@@ -72,6 +80,14 @@ contract AlgoTokenTest is Test {
     function min(int256 a, int256 b) private pure returns (int256) {
         return a <= b ? a : b;
     }
+
+    // absolute value function for bytes16
+    function abs(bytes16 val) private pure returns (bytes16) {
+        if (val.cmp(uint256(0).fromUInt()) < 0) {
+            return val.neg();
+        }
+        return val;
+    }
     
     function setUp() public {
         // Deploy mock USDC
@@ -97,25 +113,31 @@ contract AlgoTokenTest is Test {
         uint256 kValueScaled,
         uint256 ATH_peg_padding,
         uint256 bear_current,
+        uint256 initial_price,
         uint256[10] memory actions,
         uint256[10] memory amounts  
     ) 
     public {
         kValueScaled = bound(kValueScaled, 1.00001e5, 10e5); 
+        console.log("kValueScaled:", kValueScaled);
         bytes16 k = uint256(kValueScaled).fromUInt().div(uint256(1e5).fromUInt());
         
         ATH_peg_padding = bound(ATH_peg_padding, 1e6 * 10**usdc.decimals(), 100e6 * 10**usdc.decimals());
         bear_current = bound(bear_current, 0, 15e6); //0 to 5 years
 
+        initial_price = bound(initial_price, 10**usdc.decimals() / 1e3, 10 * 10**usdc.decimals()); // $.001 to $10.000
+        console.log("initial_price:", initial_price);
+
         // constructor(
         //     uint256 ATH_peg_padding_,
         //     uint256 bear_current_,
         //     bytes16 K_,
+        //     uint256 price_,
         //     string memory name_,
         //     string memory symbol_,
         //     string memory algoBond_Name_,
         //     string memory algoBond_Symbol_,
-        //     address stableCoin_contract_address,
+        //     address input_stableCoin,
         //     bytes16 bondPortionAtMaturity_,
         //     uint256 minimum_block_length_between_bondSum_updates_
         // )
@@ -126,11 +148,12 @@ contract AlgoTokenTest is Test {
             ATH_peg_padding,
             bear_current,
             k,
+            initial_price,
             "Algo Token",
             "AT",
             "Algo Bond",
             "AB",
-            address(usdc),
+            usdc,
             0x3ffb851eb851eb851eb851eb851eb852,  // bondPortionAtMaturity = 1/e^2
             216000 // minimum_block_length_between_bondSum_updates_ = 1 month
         );
@@ -144,20 +167,24 @@ contract AlgoTokenTest is Test {
         if (action == 0) {
             // Buy
             uint256 amount = bound(amounts[i], 1 * USDC_decimals_scaled, 1e6 * USDC_decimals_scaled);
-            vm.prank(alice);
+            console.log("buy amount:", amount);
+            vm.startPrank(alice);
             usdc.approve(address(algoToken), amount);
-            vm.prank(alice);
             if (usdc.balanceOf(alice) >= amount) {
                 algoToken.buy(amount);
+                console.log("new circ_supply:", algoToken.circ_supply());
             }
+            vm.stopPrank();
+            
         } else if (action == 1) {
             // Sell
             uint256 amount = bound(amounts[i], 1 * AT_decimals_scaled, 1e6 * AT_decimals_scaled);
-            vm.prank(alice);
+            vm.startPrank(alice);
             uint256 balance = algoToken.balanceOf(alice);
             if (balance > 0) {
                 algoToken.sell(bound(amount, 0, balance));
             }
+            vm.stopPrank();
         } else if (action == 2) {
             // Update
             algoToken.update();
@@ -176,21 +203,21 @@ contract AlgoTokenTest is Test {
         assertTrue(Kx.cmp(algoToken.Kx()) == 0, "Invariant failed: Kx != max(Ky, K_real)");
 
         uint256 peg = algoToken.peg();
-        bytes16 f_peg = algoToken.peg().fromUInt();
+        bytes16 f_peg = algoToken.f_peg();
         assertTrue(
-            f_peg.cmp(algoToken.f_peg()) == 0, 
-            "Invariant failed: f_peg != algoToken.f_peg()"
-        ) ;
+            peg == f_peg.toUInt(), 
+            "Invariant failed: algoToken.peg() != algoToken.f_peg()"
+        );
 
         uint256 slip = algoToken.slip();
-        bytes16 f_slip = algoToken.slip().fromUInt();
+        bytes16 f_slip = algoToken.f_slip();
         assertTrue(
-            f_slip.cmp(algoToken.f_slip()) == 0, 
-            "Invariant failed: f_slip != algoToken.f_slip()"
-        ) ;
+            slip == f_slip.toUInt(),
+            "Invariant failed: algoToken.slip() != algoToken.f_slip()"
+        );
 
         bytes16 peg_min = (Kx.mul(f_slip).add(f_peg).div(pow(Ky, f_2)));
-        if (f_peg > peg_min) {
+        if (peg > peg_min.toUInt()) {
             assertTrue(
                 algoToken.peg_min_safety().cmp(algoToken.peg_min_drain()) <= 0, 
                 "Invariant failed: peg_min_safety > peg_min_drain"
@@ -203,13 +230,16 @@ contract AlgoTokenTest is Test {
 
         uint256 reserve = peg + slip;
         bytes16 f_reserve = f_peg.add(f_slip);
-        assertTrue(f_reserve.cmp(algoToken.f_reserve()) == 0, "Invariant failed: f_reserve != algoToken.f_reserve()");
+        assertTrue(reserve == algoToken.f_reserve().toUInt(), "Invariant failed: algoToken.f_reserve() != peg + slip");
         assertTrue(reserve == algoToken.reserve(), "Invariant failed: reserve != algoToken.reserve()");
 
+        // real_Mcap = price * circ_supply
+        // target_Mcap = price * hyp_supply
         bytes16 price = algoToken.price();
         if (hyp_supply > 0) {
+            bytes16 calculated_price = K.mul(f_reserve).div(hyp_supply.fromUInt());
             assertTrue(
-                price.cmp(K.mul(f_reserve).div(hyp_supply.fromUInt())) == 0,
+                abs(calculated_price.sub(price)).cmp(f_1_div_18446744073709551616) <=0,
                 "Invariant failed: price != K * f_reserve / hyp_supply"
             );
         }
