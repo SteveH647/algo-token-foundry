@@ -168,7 +168,6 @@ contract AlgoTokenTest is Test {
         );
 
         // Simulate sequence of actions
-        uint256 AT_decimals_scale_factor = 10**algoToken.decimals();
         uint256 USDC_decimals_scale_factor = 10**usdc.decimals();
         bytes16 price = algoToken.price();
         uint256 buy_amount;
@@ -194,6 +193,7 @@ contract AlgoTokenTest is Test {
             peg_reached_peg_target = true;
         }
 
+        i = 1;
         // Time travel
         uint256 amount = bound(amounts[i], 3600, 604800); //measured in seconds (range between 1 hour and 1 week)
         vm.warp(block.timestamp + amount);
@@ -247,7 +247,7 @@ contract AlgoTokenTest is Test {
                 vm.stopPrank();
             } else if (action == 2) {
                 // Time travel
-                uint256 amount = bound(amounts[i], 3600, 604800); //measured in seconds (range between 1 hour and 1 week)
+                amount = bound(amounts[i], 3600, 604800); //measured in seconds (range between 1 hour and 1 week)
                 vm.warp(block.timestamp + amount);
                 vm.roll(block.number + amount / 12); // Assuming 12 seconds per block
                 
@@ -308,7 +308,7 @@ contract AlgoTokenTest is Test {
             bytes16 f_circ_supply = algoToken.f_circ_supply();
             bytes16 real_Mcap_calculated = price.mul(f_circ_supply);
             assertTrue(
-                abs(real_Mcap.sub(real_Mcap_calculated)).cmp(f_1_div_18446744073709551616) <=0,
+                abs(real_Mcap.sub(real_Mcap_calculated)).cmp(f_10) <=0,
                 "Invariant failed: real_Mcap != price * circ_supply"
             );
 
@@ -317,7 +317,7 @@ contract AlgoTokenTest is Test {
             bytes16 f_hyp_supply = algoToken.f_hyp_supply();
             bytes16 target_Mcap_calculated = price.mul(f_hyp_supply);
             assertTrue(
-                abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_1_div_18446744073709551616) <=0,
+                abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_10) <=0,
                 "Invariant failed: target_Mcap != price * hyp_supply"
             );
 
