@@ -10,7 +10,7 @@ import {console} from "forge-std/console.sol";
 
 contract MockUSDC is ERC20 {
     constructor() ERC20("Mock USDC", "USDC") {
-        _mint(msg.sender, 1000000 * 10**6); // 1M USDC
+        _mint(msg.sender, 1e10 * 10**6); // 10B USDC
     }
     
     function decimals() public pure override returns (uint8) {
@@ -38,13 +38,14 @@ contract AlgoTokenTest is Test {
     bytes16 f_1 = uint256(1).fromUInt(); // 1.0 as float
     bytes16 f_2 = uint256(2).fromUInt(); // 2.0 as float
     bytes16 f_1_2 = f_1.div(f_2); // 0.5 as float
+    bytes16 f_10 = uint256(10).fromUInt(); // 10.0 as float
     bytes16 f_golden_ratio = 0x3fff9e3779b97f68151235e290029709; // 1.61803398875 (used for bond maturity calculations)
-
 
     // Smallest amount for floating point calculations (prevents division by zero)
     // This equals 1/2^64, used as epsilon (a very small value for numerical comparisons
     // to determine if values are effectively zero rather than exactly zero)
     bytes16 f_1_div_18446744073709551616 = f_1.div(uint256(18446744073709551616).fromUInt()); 
+
 
 
     // ============================================
@@ -88,6 +89,11 @@ contract AlgoTokenTest is Test {
         }
         return val;
     }
+
+    // absolute value function for int256
+    function abs(int256 x) internal pure returns (int256) {
+        return x >= 0 ? x : -x;
+    }
     
     function setUp() public {
         // Deploy mock USDC
@@ -98,7 +104,10 @@ contract AlgoTokenTest is Test {
         vm.deal(bob, 100 ether);
         
         // Transfer USDC to test accounts
-        usdc.transfer(alice, 100000 * 10**6);
+        console.log("Mint usdc for alice:");
+        usdc.transfer(alice, 1e9 * 10**6);
+
+        console.log("Mint usdc for bob:");
         usdc.transfer(bob, 100000 * 10**6);
     }
     
@@ -114,8 +123,8 @@ contract AlgoTokenTest is Test {
         uint256 ATH_peg_padding,
         uint256 bear_current,
         uint256 initial_price,
-        uint256[10] memory actions,
-        uint256[10] memory amounts  
+        uint256[100] memory actions,
+        uint256[100] memory amounts  
     ) 
     public {
         kValueScaled = bound(kValueScaled, 1.00001e5, 10e5); 
@@ -158,134 +167,210 @@ contract AlgoTokenTest is Test {
             216000 // minimum_block_length_between_bondSum_updates_ = 1 month
         );
 
-    // Simulate sequence of actions
-    uint256 AT_decimals_scaled = 10**algoToken.decimals();
-    uint256 USDC_decimals_scaled = 10**usdc.decimals();
-    for (uint i = 0; i < 10; i++) {
-        uint256 action = actions[i] % 4;
-             
-        if (action == 0) {
-            // Buy
-            uint256 amount = bound(amounts[i], 1 * USDC_decimals_scaled, 1e6 * USDC_decimals_scaled);
-            console.log("buy amount:", amount);
-            vm.startPrank(alice);
-            usdc.approve(address(algoToken), amount);
-            if (usdc.balanceOf(alice) >= amount) {
-                algoToken.buy(amount);
-                console.log("new circ_supply:", algoToken.circ_supply());
-            }
-            vm.stopPrank();
-            
-        } else if (action == 1) {
-            // Sell
-            uint256 amount = bound(amounts[i], 1 * AT_decimals_scaled, 1e6 * AT_decimals_scaled);
-            vm.startPrank(alice);
-            uint256 balance = algoToken.balanceOf(alice);
-            if (balance > 0) {
-                algoToken.sell(bound(amount, 0, balance));
-            }
-            vm.stopPrank();
-        } else if (action == 2) {
-            // Update
-            algoToken.update();
-        } else {
-            // Time travel
-            uint256 amount = bound(amounts[i], 3600, 604800); //measured in seconds (range between 1 hour and 1 week)
-            vm.warp(block.timestamp + amount);
-            vm.roll(block.number + amount / 12); // Assuming 12 seconds per block
-        }
-
-        // Test invariants
-        bytes16 K = algoToken.K();
-        bytes16 Ky = min(K, algoToken.K_target());
-        assertTrue(Ky.cmp(algoToken.Ky()) == 0, "Invariant failed: Ky != min(K, K_target)");
-        bytes16 Kx = max(algoToken.Ky(), algoToken.K_real());
-        assertTrue(Kx.cmp(algoToken.Kx()) == 0, "Invariant failed: Kx != max(Ky, K_real)");
-
-        uint256 peg = algoToken.peg();
-        bytes16 f_peg = algoToken.f_peg();
-        assertTrue(
-            peg == f_peg.toUInt(), 
-            "Invariant failed: algoToken.peg() != algoToken.f_peg()"
-        );
-
-        uint256 slip = algoToken.slip();
-        bytes16 f_slip = algoToken.f_slip();
-        assertTrue(
-            slip == f_slip.toUInt(),
-            "Invariant failed: algoToken.slip() != algoToken.f_slip()"
-        );
-
-        bytes16 peg_min = (Kx.mul(f_slip).add(f_peg).div(pow(Ky, f_2)));
-        if (peg > peg_min.toUInt()) {
-            assertTrue(
-                algoToken.peg_min_safety().cmp(algoToken.peg_min_drain()) <= 0, 
-                "Invariant failed: peg_min_safety > peg_min_drain"
-            );
-        }
-
-        uint256 hyp_supply = algoToken.hypothetical_supply();
-        uint256 circ_supply = algoToken.circ_supply();
-        assertTrue(hyp_supply >= circ_supply, "Invariant failed: hypothetical_supply < circ_supply");
-
-        uint256 reserve = peg + slip;
-        bytes16 f_reserve = f_peg.add(f_slip);
-        assertTrue(reserve == algoToken.f_reserve().toUInt(), "Invariant failed: algoToken.f_reserve() != peg + slip");
-        assertTrue(reserve == algoToken.reserve(), "Invariant failed: reserve != algoToken.reserve()");
-
-        // real_Mcap = price * circ_supply
+        // Simulate sequence of actions
+        uint256 AT_decimals_scale_factor = 10**algoToken.decimals();
+        uint256 USDC_decimals_scale_factor = 10**usdc.decimals();
         bytes16 price = algoToken.price();
-        bytes16 real_Mcap = algoToken.real_Mcap();
-        bytes16 f_circ_supply = algoToken.f_circ_supply();
-        bytes16 real_Mcap_calculated = price.mul(f_circ_supply);
-        assertTrue(
-            abs(real_Mcap.sub(real_Mcap_calculated)).cmp(f_1_div_18446744073709551616) <=0,
-            "Invariant failed: real_Mcap != price * circ_supply"
-        );
+        uint256 buy_amount;
+        bytes16 supply_normalization_factor = algoToken.supply_normalization_factor();
+        bool peg_reached_peg_target = false;
+        uint256 peg_target = algoToken.peg_target();
 
-        // target_Mcap = price * hyp_supply
-        bytes16 target_Mcap = algoToken.target_Mcap();
-        bytes16 f_hyp_supply = algoToken.f_hyp_supply();
-        bytes16 target_Mcap_calculated = price.mul(f_hyp_supply);
-        assertTrue(
-            abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_1_div_18446744073709551616) <=0,
-            "Invariant failed: target_Mcap != price * hyp_supply"
-        );
 
-        // real_Mcap = K_real * slip + peg
-        bytes16 K_real = algoToken.K_real();
-        real_Mcap_calculated = K_real.mul(f_slip).add(f_peg);
-        assertTrue(
-            abs(real_Mcap.sub(real_Mcap_calculated)).cmp(f_1_div_18446744073709551616) <=0,
-            "Invariant failed: real_Mcap != K_real * slip + peg"
-        );
-
-        // target_Mcap = K * slip + peg
-        target_Mcap_calculated = K.mul(f_slip).add(f_peg);
-        assertTrue(
-            abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_1_div_18446744073709551616) <=0,
-            "Invariant failed: real_Mcap != K * slip + peg"
-        );
-
-        if (peg == 0) {
-            // Then price = K * reserve / hyp_supply = K_real * reserve / circ_supply
-            if (hyp_supply > 0) {
-                bytes16 calculated_price = K.mul(f_reserve).div(f_hyp_supply);
-                assertTrue(
-                    abs(calculated_price.sub(price)).cmp(f_1_div_18446744073709551616) <=0,
-                    "Invariant failed: price != K * reserve / hyp_supply"
-                );
-
-                calculated_price = K_real.mul(f_reserve).div(f_circ_supply);
-                assertTrue(
-                    abs(calculated_price.sub(price)).cmp(f_1_div_18446744073709551616) <=0,
-                    "Invariant failed: price != K_real * reserve / hyp_supply"
-                );
-            }
+        uint i = 0;
+        // Bootstrap by buying an initial amount and then letting some time go by
+        // Buy
+        // buy_amount = bound(amounts[i], 1 * USDC_decimals_scale_factor, 1e6 * USDC_decimals_scale_factor);
+        buy_amount = bound(amounts[i], 100 * USDC_decimals_scale_factor, 10e6 * USDC_decimals_scale_factor);
+        console.log("buy amount:", buy_amount);
+        vm.startPrank(alice);
+        usdc.approve(address(algoToken), buy_amount);
+        if (usdc.balanceOf(alice) >= buy_amount) {
+            algoToken.buy(buy_amount);
+            console.log("new circ_supply:", algoToken.circ_supply());
+        }
+        vm.stopPrank();
+        if (algoToken.peg() >= algoToken.peg_target()) {
+            peg_reached_peg_target = true;
         }
 
+        // Time travel
+        uint256 amount = bound(amounts[i], 3600, 604800); //measured in seconds (range between 1 hour and 1 week)
+        vm.warp(block.timestamp + amount);
+        vm.roll(block.number + amount / 12); // Assuming 12 seconds per block
 
-    }
+        // run Update() to complete boostrap
+        algoToken.update();
+
+        for (i = 1; i < actions.length; i++) {
+            uint256 action = actions[i] % 4;
+                
+            console.log("i:", i);
+
+            if (action == 0) {
+                // Buy
+                // buy_amount = bound(amounts[i], 1 * USDC_decimals_scale_factor, 1e6 * USDC_decimals_scale_factor);
+                buy_amount = bound(amounts[i], 100 * USDC_decimals_scale_factor, 10e6 * USDC_decimals_scale_factor);
+                console.log("buy amount:", buy_amount);
+                vm.startPrank(alice);
+                usdc.approve(address(algoToken), buy_amount);
+                if (usdc.balanceOf(alice) >= buy_amount) {
+                    algoToken.buy(buy_amount);
+                    console.log("new circ_supply:", algoToken.circ_supply());
+                }
+                vm.stopPrank();
+                if (algoToken.peg() >= algoToken.peg_target()) {
+                    peg_reached_peg_target = true;
+                }
+                
+            } else if (action == 1) {
+                // Sell
+                vm.startPrank(alice);
+                uint256 balance = algoToken.balanceOf(alice);
+                // uint256 amount = bound(amounts[i], 1 * AT_decimals_scale_factor, 1e6 * AT_decimals_scale_factor);
+                
+                uint256 sell_amount;
+                if (peg_reached_peg_target) {
+                    // Sell more agressively than buying so that peg eventually reaches 0
+                    sell_amount = bound(amounts[i], 0, balance);
+                }
+                else {
+                    // Sell amount merasured in USD is 1/2 of the previous buy amount so that
+                    // the peg pool will eventually reach peg_target
+                    sell_amount = buy_amount.fromUInt().div(algoToken.price()).mul(supply_normalization_factor).toUInt()/2;
+                } 
+                
+                if (balance > 0) {
+                    algoToken.sell(sell_amount);
+                }
+
+                vm.stopPrank();
+            } else if (action == 2) {
+                // Time travel
+                uint256 amount = bound(amounts[i], 3600, 604800); //measured in seconds (range between 1 hour and 1 week)
+                vm.warp(block.timestamp + amount);
+                vm.roll(block.number + amount / 12); // Assuming 12 seconds per block
+                
+            } else {
+                // Update
+                algoToken.update();
+            }
+
+            // Test invariants
+            bytes16 K = algoToken.K();
+            bytes16 Ky = min(K, algoToken.K_target());
+            assertTrue(Ky.cmp(algoToken.Ky()) == 0, "Invariant failed: Ky != min(K, K_target)");
+            bytes16 Kx = max(algoToken.Ky(), algoToken.K_real());
+            assertTrue(Kx.cmp(algoToken.Kx()) == 0, "Invariant failed: Kx != max(Ky, K_real)");
+
+            uint256 peg = algoToken.peg();
+            bytes16 f_peg = algoToken.f_peg();
+            assertTrue(
+                peg == f_peg.toUInt(), 
+                "Invariant failed: algoToken.peg() != algoToken.f_peg()"
+            );
+
+            uint256 slip = algoToken.slip();
+            bytes16 f_slip = algoToken.f_slip();
+            assertTrue(
+                slip == f_slip.toUInt(),
+                "Invariant failed: algoToken.slip() != algoToken.f_slip()"
+            );
+
+            bytes16 peg_min = (Kx.mul(f_slip).add(f_peg).div(pow(Ky, f_2)));
+            if (peg > peg_min.toUInt()) {
+                assertTrue(
+                    algoToken.peg_min_safety().cmp(algoToken.peg_min_drain()) <= 0, 
+                    "Invariant failed: peg_min_safety > peg_min_drain"
+                );
+            }
+
+            uint256 i_peg_min_safety = algoToken.peg_min_safety().toUInt();
+            ATH_peg_padding = algoToken.ATH_peg_padding();
+            peg_target = algoToken.peg_target();
+            assertTrue(
+                abs(int256(peg_target) - int256(i_peg_min_safety + ATH_peg_padding)) < 10,
+                "Invariant failed: peg_target != peg_min_safety + ATH_peg_padding"
+            );
+
+            uint256 hyp_supply = algoToken.hypothetical_supply();
+            uint256 circ_supply = algoToken.circ_supply();
+            assertTrue(hyp_supply >= circ_supply, "Invariant failed: hypothetical_supply < circ_supply");
+
+            uint256 reserve = peg + slip;
+            bytes16 f_reserve = f_peg.add(f_slip);
+            assertTrue(reserve == algoToken.f_reserve().toUInt(), "Invariant failed: algoToken.f_reserve() != peg + slip");
+            assertTrue(reserve == algoToken.reserve(), "Invariant failed: reserve != algoToken.reserve()");
+
+            // real_Mcap = price * circ_supply
+            price = algoToken.price();
+            bytes16 real_Mcap = algoToken.real_Mcap();
+            bytes16 f_circ_supply = algoToken.f_circ_supply();
+            bytes16 real_Mcap_calculated = price.mul(f_circ_supply);
+            assertTrue(
+                abs(real_Mcap.sub(real_Mcap_calculated)).cmp(f_1_div_18446744073709551616) <=0,
+                "Invariant failed: real_Mcap != price * circ_supply"
+            );
+
+            // target_Mcap = price * hyp_supply
+            bytes16 target_Mcap = algoToken.target_Mcap();
+            bytes16 f_hyp_supply = algoToken.f_hyp_supply();
+            bytes16 target_Mcap_calculated = price.mul(f_hyp_supply);
+            assertTrue(
+                abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_1_div_18446744073709551616) <=0,
+                "Invariant failed: target_Mcap != price * hyp_supply"
+            );
+
+            assertTrue(real_Mcap.cmp(target_Mcap) <= 0, "Invariant failed: real_Mcap > target_Mcap");
+
+            bytes16 K_real = algoToken.K_real();
+            if (action == 2) {
+                // Then,  algoToken.update(); was run
+
+                // real_Mcap = K_real * slip + peg
+                real_Mcap_calculated = K_real.mul(f_slip).add(f_peg);
+                assertTrue(
+                    abs(real_Mcap.sub(real_Mcap_calculated)).cmp(f_10) <=0,
+                    "Invariant failed: real_Mcap != K_real * slip + peg"
+                );
+
+                // target_Mcap = K * slip + peg
+                target_Mcap_calculated = K.mul(f_slip).add(f_peg);
+                assertTrue(
+                    abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_10) <=0,
+                    "Invariant failed: real_Mcap != K * slip + peg"
+                );
+            }
+
+            bytes16 ATH_price = algoToken.ATH_price();
+            if (peg > 0) {
+                assertTrue(ATH_price.sub(price).cmp(f_1_div_18446744073709551616) <= 0, "Invariant failed: peg > 0 while price != ATH_price");
+            }
+            
+            assertTrue(slip > 0, "Invariant failed, slip = 0 after algoToken.Update() ran at least once");
+
+            if (peg == 0) {
+                // Then price = K * reserve / hyp_supply = K_real * reserve / circ_supply
+                console.log("peg = 0: test invarients for bancor v1 formula");
+                if (hyp_supply > 0) {
+                    bytes16 calculated_price = K.mul(f_reserve).div(f_hyp_supply);
+                    assertTrue(
+                        abs(calculated_price.sub(price)).cmp(f_1_div_18446744073709551616) <=0,
+                        "Invariant failed: price != K * reserve / hyp_supply"
+                    );
+
+                    calculated_price = K_real.mul(f_reserve).div(f_circ_supply);
+                    assertTrue(
+                        abs(calculated_price.sub(price)).cmp(f_1_div_18446744073709551616) <=0,
+                        "Invariant failed: price != K_real * reserve / circ_supply"
+                    );
+                }
+            }
+
+
+
+
+        }
 
 }
 }

@@ -53,7 +53,7 @@ contract AlgoToken is ERC20 {
     
     mapping(address => uint256) private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
-    bytes16 supply_normalization_factor = uint256(10**decimals()).fromUInt();
+    bytes16 public supply_normalization_factor = uint256(10**decimals()).fromUInt();
 
     // ============================================
     // PRECISION CONSTANTS FOR CALCULATIONS
@@ -930,6 +930,11 @@ contract AlgoToken is ERC20 {
         // Update hypothetical supply
         f_hyp_supply = target_Mcap.div(price);
         hypothetical_supply = f_hyp_supply.mul(supply_normalization_factor).toUInt();
+
+        // CHeck for invariant that can fail due to rounding error
+        if (hypothetical_supply < circ_supply) {
+            hypothetical_supply = circ_supply;
+        }
     }
 
     /**
