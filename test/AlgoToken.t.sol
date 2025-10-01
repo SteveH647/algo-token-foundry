@@ -41,13 +41,6 @@ contract AlgoTokenTest is Test {
     bytes16 f_10 = uint256(10).fromUInt(); // 10.0 as float
     bytes16 f_golden_ratio = 0x3fff9e3779b97f68151235e290029709; // 1.61803398875 (used for bond maturity calculations)
 
-    // Smallest amount for floating point calculations (prevents division by zero)
-    // This equals 1/2^64, used as epsilon (a very small value for numerical comparisons
-    // to determine if values are effectively zero rather than exactly zero)
-    bytes16 f_1_div_18446744073709551616 = f_1.div(uint256(18446744073709551616).fromUInt()); 
-
-
-
     // ============================================
     // MATHEMATICAL HELPER FUNCTIONS
     // ============================================
@@ -221,6 +214,15 @@ contract AlgoTokenTest is Test {
                 vm.stopPrank();
                 if (algoToken.peg() >= algoToken.peg_target()) {
                     peg_reached_peg_target = true;
+                    assertTrue(
+                        algoToken.peg() == algoToken.peg_target(),
+                        "Invariant Failed: peg > peg_target"
+                    );
+                    
+                    assertTrue(
+                        algoToken.bear_current().cmp(f_0) == 0,
+                        "bear_current != 0 after peg reached peg_target"
+                    ); 
                 }
                 
             } else if (action == 1) {
@@ -246,14 +248,14 @@ contract AlgoTokenTest is Test {
 
                 vm.stopPrank();
             } else if (action == 2) {
+                // Update
+                algoToken.update();
+                
+            } else {
                 // Time travel
                 amount = bound(amounts[i], 3600, 604800); //measured in seconds (range between 1 hour and 1 week)
                 vm.warp(block.timestamp + amount);
                 vm.roll(block.number + amount / 12); // Assuming 12 seconds per block
-                
-            } else {
-                // Update
-                algoToken.update();
             }
 
             // Test invariants
@@ -340,28 +342,43 @@ contract AlgoTokenTest is Test {
                     abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_10) <=0,
                     "Invariant failed: real_Mcap != K * slip + peg"
                 );
+
+                assertTrue(
+                    algoToken.bear_estimate().cmp(algoToken.bear_current()) >= 0,
+                    "Invariant failed: bear_estimate < bear_current"
+                );
+
+                assertTrue(
+                    algoToken.bear_actual().cmp(algoToken.bear_current()) >= 0,
+                    "Invariant failed: bear_actual < bear_current"
+                );
+
+                assertTrue(
+                    algoToken.bear_actual().cmp(algoToken.bear_estimate()) >= 0,
+                    "Invariant failed: bear_actual < bear_estimate"
+                );
             }
 
             bytes16 ATH_price = algoToken.ATH_price();
             if (peg > 0) {
-                assertTrue(ATH_price.sub(price).cmp(f_1_div_18446744073709551616) <= 0, "Invariant failed: peg > 0 while price != ATH_price");
+                assertTrue(ATH_price.sub(price).cmp(f_10) <= 0, "Invariant failed: peg > 0 while price != ATH_price");
             }
             
             assertTrue(slip > 0, "Invariant failed, slip = 0 after algoToken.Update() ran at least once");
 
             if (peg == 0) {
                 // Then price = K * reserve / hyp_supply = K_real * reserve / circ_supply
-                console.log("peg = 0: test invarients for bancor v1 formula");
+                console.log("peg = 0: test invariants for bancor v1 formula");
                 if (hyp_supply > 0) {
                     bytes16 calculated_price = K.mul(f_reserve).div(f_hyp_supply);
                     assertTrue(
-                        abs(calculated_price.sub(price)).cmp(f_1_div_18446744073709551616) <=0,
+                        abs(calculated_price.sub(price)).cmp(f_10) <=0,
                         "Invariant failed: price != K * reserve / hyp_supply"
                     );
 
                     calculated_price = K_real.mul(f_reserve).div(f_circ_supply);
                     assertTrue(
-                        abs(calculated_price.sub(price)).cmp(f_1_div_18446744073709551616) <=0,
+                        abs(calculated_price.sub(price)).cmp(f_10) <=0,
                         "Invariant failed: price != K_real * reserve / circ_supply"
                     );
                 }

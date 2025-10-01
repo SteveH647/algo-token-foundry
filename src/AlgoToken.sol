@@ -45,6 +45,7 @@ contract AlgoToken is ERC20 {
     bytes16 f_1 = uint256(1).fromUInt(); // 1.0 as float
     bytes16 f_2 = uint256(2).fromUInt(); // 2.0 as float
     bytes16 f_1_2 = f_1.div(f_2); // 0.5 as float
+    bytes16 f_10 = uint256(10).fromUInt(); // 10.0 as float
     bytes16 f_golden_ratio = 0x3fff9e3779b97f68151235e290029709; // 1.61803398875 (used for bond maturity calculations)
 
     // ============================================
@@ -54,15 +55,6 @@ contract AlgoToken is ERC20 {
     mapping(address => uint256) private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
     bytes16 public supply_normalization_factor = uint256(10**decimals()).fromUInt();
-
-    // ============================================
-    // PRECISION CONSTANTS FOR CALCULATIONS
-    // ============================================
-    
-    // Smallest amount for floating point calculations (prevents division by zero)
-    // This equals 1/2^64, used as epsilon (a very small value for numerical comparisons
-    // to determine if values are effectively zero rather than exactly zero)
-    bytes16 f_1_div_18446744073709551616 = f_1.div(uint256(18446744073709551616).fromUInt());
 
     // ============================================
     // PRICE AND SUPPLY VARIABLES
@@ -569,7 +561,7 @@ contract AlgoToken is ERC20 {
                 bear_current = bear_current.add(blocks_since_last_bear_update.fromUInt()); 
 
                 // Check if this was a "major" bear market
-                if (bear_current.add(f_1_div_18446744073709551616).cmp(bear_estimate) >= 0) { 
+                if (bear_current.add(f_10).cmp(bear_estimate) >= 0) { 
                     // Update our bear market benchmarks
                     bear_actual = bear_current;
                     bear_estimate = bear_current;
@@ -723,6 +715,8 @@ contract AlgoToken is ERC20 {
         f_peg = peg.fromUInt();
         f_slip = slip.fromUInt();
         f_reserve = reserve.fromUInt();
+
+        console.log("t_t0", t_t0);
         
         if (t_t0 > 0 && circ_supply > 0) {
             // At least 1 block has passed, do the update
@@ -814,7 +808,7 @@ contract AlgoToken is ERC20 {
         bytes16 step_size = f_t_t0.div(bear_estimate); 
 
         bytes16 f_peg_minus_peg_min_drain = f_peg.sub(peg_min_drain);
-        if (f_peg_minus_peg_min_drain.cmp(f_1_div_18446744073709551616) >= 0) {
+        if (f_peg_minus_peg_min_drain.cmp(f_10) >= 0) {
             // Peg significantly above minimum, calculate drainage
             
             /**
@@ -987,10 +981,10 @@ contract AlgoToken is ERC20 {
      * Handles both growth mode (K_target > K) and conservative mode (K_target < K)
      */
     function update_target_Mcap_K_real_and_K() private {
-        if (f_slip.cmp(f_1_div_18446744073709551616) >= 0) {
+        if (f_slip.cmp(f_10) >= 0) {
             // Update K_real from drainage (K_real decreases as drainage moves USD from peg to slip)
             bytes16 real_Mcap_peg = real_Mcap.sub(f_peg);
-            if (real_Mcap_peg.cmp(f_1_div_18446744073709551616) >= 0) {
+            if (real_Mcap_peg.cmp(f_10) >= 0) {
                 K_real = real_Mcap_peg.div(f_slip);
             }
             
@@ -1002,10 +996,10 @@ contract AlgoToken is ERC20 {
                 // Conservative mode: K decreases from drainage
                 // Target market cap stays constant
                 bytes16 target_Mcap_peg = target_Mcap.sub(f_peg);
-                if (target_Mcap_peg.cmp(f_1_div_18446744073709551616) >= 0) {
-                    console.log("target_Mcap_peg.cmp(f_1_div_18446744073709551616) >= 0.   K before: ", K.mul(uint256(100).fromUInt()).toUInt());
+                if (target_Mcap_peg.cmp(f_10) >= 0) {
+                    console.log("target_Mcap_peg.cmp(f_10) >= 0.   K before: ", K.mul(uint256(100).fromUInt()).toUInt());
                     K = max(K_target, target_Mcap_peg.div(f_slip)); // Do not decrease K below K_Target
-                    console.log("target_Mcap_peg.cmp(f_1_div_18446744073709551616) >= 0.   K after: ", K.mul(uint256(100).fromUInt()).toUInt());
+                    console.log("target_Mcap_peg.cmp(f_10) >= 0.   K after: ", K.mul(uint256(100).fromUInt()).toUInt());
                 }
             }
 
@@ -1037,18 +1031,18 @@ contract AlgoToken is ERC20 {
     function calculate_peg_min_safety_and_peg_target() private {
         bytes16 tmp_f_slip;
         
-        if (ATH_price.sub(price).cmp(f_1_div_18446744073709551616) <= 0) {
-            console.log("ATH_price.sub(price).cmp(f_1_div_18446744073709551616) <= 0");
+        if (ATH_price.sub(price).cmp(f_10) <= 0) {
+            console.log("ATH_price.sub(price).cmp(f_10) <= 0");
             console.log("f_slip:", f_slip.toUInt());
             //console.log("f_slip = %s", f_slip);
             // At ATH price
             slip_that_reaches_ATH_price = slip;
             //console.log("slip_that_reaches_ATH_price = %s", slip_that_reaches_ATH_price);
-            tmp_f_slip = f_slip.cmp(f_1_div_18446744073709551616) >= 0 ? f_slip : f_0;
+            tmp_f_slip = f_slip.cmp(f_10) >= 0 ? f_slip : f_0;
             //console.log("tmp_f_slip = %s", tmp_f_slip);
         }
         else {
-            console.log("ELSE OF: ATH_price.sub(price).cmp(f_1_div_18446744073709551616) <= 0");
+            console.log("ELSE OF: ATH_price.sub(price).cmp(f_10) <= 0");
             // Below ATH - calculate slip needed to reach it
             // Uses Bancor formula: R = R0 * (P_ATH/P)^(1/(1-1/K))
             slip_that_reaches_ATH_price = 
@@ -1062,8 +1056,8 @@ contract AlgoToken is ERC20 {
             tmp_f_slip = slip_that_reaches_ATH_price.fromUInt();
         }
         
-        if (tmp_f_slip.cmp(f_1_div_18446744073709551616) >= 0) {
-            console.log("tmp_f_slip.cmp(f_1_div_18446744073709551616) >= 0");
+        if (tmp_f_slip.cmp(f_10) >= 0) {
+            console.log("tmp_f_slip.cmp(f_10) >= 0");
             // Update Kx and Ky
             Ky = min(K, K_target);
             Kx = max(K_real, K_target);
@@ -1080,7 +1074,7 @@ contract AlgoToken is ERC20 {
             console.log("peg_min_safety:", peg_min_safety.toUInt());
         }
         else {
-            console.log("ELSE OF: tmp_f_slip.cmp(f_1_div_18446744073709551616) >= 0");
+            console.log("ELSE OF: tmp_f_slip.cmp(f_10) >= 0");
             peg_min_safety = f_0;
         }
         
@@ -1111,8 +1105,8 @@ contract AlgoToken is ERC20 {
             // Decay bear_estimate towards bear_current
             bytes16 f_peg_minus_peg_min_safety = f_peg.sub(peg_min_safety);
             
-            if (f_peg_minus_peg_min_safety.cmp(f_1_div_18446744073709551616) >= 0
-                && bear_estimate.cmp(f_1_div_18446744073709551616) >= 0) {
+            if (f_peg_minus_peg_min_safety.cmp(f_10) >= 0
+                && bear_estimate.cmp(f_10) >= 0) {
                 
                 demand_score_safety = f_peg.sub(peg_min_safety).div(ATH_peg_padding.fromUInt());
                 // Bear estimate decay formula: bear_estimate = bear_estimate0 * e^(-demand_score_safety * (t-t0) / bear_actual)
@@ -1149,7 +1143,7 @@ contract AlgoToken is ERC20 {
     function calculate_demand_score_drainage() private {
         bytes16 f_peg_minus_peg_min_drain = f_peg.sub(peg_min_drain);
         
-        if (f_peg_minus_peg_min_drain.cmp(f_1_div_18446744073709551616) >= 0) {
+        if (f_peg_minus_peg_min_drain.cmp(f_10) >= 0) {
             // Calculate score: (peg - peg_min) / (peg_target - peg_min)
             demand_score_drainage = 
             f_peg_minus_peg_min_drain.div(
