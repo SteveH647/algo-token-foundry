@@ -242,6 +242,8 @@ contract AlgoTokenTest is Test {
                     sell_amount = buy_amount.fromUInt().div(algoToken.price()).mul(supply_normalization_factor).toUInt()/2;
                 } 
                 
+                console.log("Selling: balance:", balance);
+
                 if (balance > 0) {
                     algoToken.sell(sell_amount);
                 }
@@ -328,6 +330,7 @@ contract AlgoTokenTest is Test {
             bytes16 K_real = algoToken.K_real();
             if (action == 2) {
                 // Then,  algoToken.update(); was run
+                assertTrue(K_real.cmp(K) <= 0, "Invariante failed: K_real > K");
 
                 // real_Mcap = K_real * slip + peg
                 real_Mcap_calculated = K_real.mul(f_slip).add(f_peg);

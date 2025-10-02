@@ -52,8 +52,6 @@ contract AlgoToken is ERC20 {
     // ERC20 STATE VARIABLES
     // ============================================
     
-    mapping(address => uint256) private _balances;
-    mapping(address => mapping(address => uint256)) private _allowances;
     bytes16 public supply_normalization_factor = uint256(10**decimals()).fromUInt();
 
     // ============================================
@@ -175,6 +173,17 @@ contract AlgoToken is ERC20 {
      * Since K_target = sqrt(1/expected_supply_selloff), this cap is essential
      */
     bytes16 public max_expected_supply_selloff;
+
+    /**
+     * @dev actual supply selloff amount in the current bear market
+     * When the current bear market ends, if it was considered "major" and 
+     * the actual selloff is lower than the current expected_supply_selloff, then
+     * expected_supply_selloff is updated to be equal to 
+     * highest_actual_supply_selloff_of_current_bear_market
+     * and K and K_target are updated accordingly.  This allows K to appreciate
+     * independently from the amount of supply locked in bonds.
+     */
+    bytes16 public highest_actual_supply_selloff_of_current_bear_market;
 
     // ============================================
     // RESERVE POOLS
@@ -363,6 +372,7 @@ contract AlgoToken is ERC20 {
         // Calculate initial expected selloff
         expected_supply_selloff = f_1.div(Kx.mul(Kx));
         max_expected_supply_selloff = expected_supply_selloff;
+        highest_actual_supply_selloff_of_current_bear_market = expected_supply_selloff;
 
         // Set bond parameters
         bondPortionAtMaturity = bondPortionAtMaturity_;
@@ -383,20 +393,6 @@ contract AlgoToken is ERC20 {
     // ============================================
     // ERC20 OVERRIDES
     // ============================================
-    
-    /**
-     * @dev Override required due to ERC20 implementation bug
-     * Returns the token balance of an account
-     */
-    function balanceOf(address account) public view virtual override returns (uint256) {
-        return _balances[account];
-    }
-
-    function approve(address spender, uint256 amount) public virtual override returns (bool) {
-        address owner = _msgSender();
-        _approve(owner, spender, amount);
-        return true;
-    }
 
     // function _approve(
     //     address owner,
@@ -409,10 +405,6 @@ contract AlgoToken is ERC20 {
     //     _allowances[owner][spender] = amount;
     //     emit Approval(owner, spender, amount);
     // }
-
-    function allowance(address owner, address spender) public view override returns (uint256) {
-        return _allowances[owner][spender];
-    }
 
     // ============================================
     // MATHEMATICAL HELPER FUNCTIONS
@@ -495,7 +487,7 @@ contract AlgoToken is ERC20 {
                 algos_to_mint = new_hyp_supply - hypothetical_supply;
                 slip = new_slip;
                 f_slip = slip.fromUInt();
-                f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
+                f_hyp_supply = new_hyp_supply.fromUInt().div(supply_normalization_factor);
                 price = K.mul(f_slip).div(f_hyp_supply); // P = K * R/S
                 USD_remaining = 0;
                 circ_supply += algos_to_mint;
@@ -563,9 +555,32 @@ contract AlgoToken is ERC20 {
                 // Check if this was a "major" bear market
                 if (bear_current.add(f_10).cmp(bear_estimate) >= 0) { 
                     // Update our bear market benchmarks
+                    console.log("bear_actual before updating", bear_actual.toUInt());
+                    console.log("bear_estimate before updating", bear_estimate.toUInt());
+                    console.log("bear_current", bear_current.toUInt());
                     bear_actual = bear_current;
                     bear_estimate = bear_current;
+                    console.log(
+                        "highest_actual_supply_selloff_of_current_bear_market", 
+                        highest_actual_supply_selloff_of_current_bear_market.mul(uint256(1e40).fromUInt()).toUInt()
+                    );
+                    console.log(
+                        "expected_supply_selloff before updated to highest_actual_supply_selloff_of_current_bear_market", 
+                        expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt()
+                    );
+                    expected_supply_selloff = highest_actual_supply_selloff_of_current_bear_market;
+                    // Cap at maximum allowed
+                    if (expected_supply_selloff.cmp(max_expected_supply_selloff) > 0) {
+                        expected_supply_selloff = max_expected_supply_selloff;
+                    }
+                    console.log(
+                        "expected_supply_selloff after end of major bear market", 
+                        expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
+                    console.log("K before updated at end of major bear market", K.mul(uint256(1e5).fromUInt()).toUInt());
+                    K = f_1.div(expected_supply_selloff).sqrt();
                 }
+
+                highest_actual_supply_selloff_of_current_bear_market = f_0;
                 
                 // Reset bear market counter
                 bear_current = f_0;
@@ -947,16 +962,30 @@ contract AlgoToken is ERC20 {
         expected_supply_selloff = f_1.sub(
             total_algos_locked_in_bonds.fromUInt().div(f_highest_circ_supply_since_bear_end)
         );
+        console.log("expected_supply_selloff algos locked in bonds:", expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
         
         // Cap at K-implied selloff
+        console.log("hello");
+        //console.log("K", K.mul(uint256(1e5).fromUInt()).toUInt());
         bytes16 expected_supply_selloff_as_per_K = f_1.div(pow(K, f_2));
+        console.log("hello again");
+        console.log("expected_supply_selloff_as_per_K", expected_supply_selloff_as_per_K.mul(uint256(1e40).fromUInt()).toUInt());
         expected_supply_selloff = min(expected_supply_selloff, expected_supply_selloff_as_per_K);
-        
+        console.log("expected_supply_selloff after min check", expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
+
         // Check actual selloff
         bytes16 actual_supply_selloff = f_1.sub(
             circ_supply.fromUInt().div(f_highest_circ_supply_since_bear_end)
         );
-        
+
+        console.log("circ_supply", circ_supply);
+        console.log("highest_circ_supply_since_bear_end", highest_circ_supply_since_bear_end);
+        console.log("actual_supply_selloff:", actual_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
+
+        if (actual_supply_selloff.cmp(highest_actual_supply_selloff_of_current_bear_market) > 0) {
+            highest_actual_supply_selloff_of_current_bear_market = actual_supply_selloff;
+        }
+
         // If actual worse than expected, update expectations
         if (actual_supply_selloff.cmp(expected_supply_selloff) > 0) {
             expected_supply_selloff = actual_supply_selloff;
@@ -967,6 +996,9 @@ contract AlgoToken is ERC20 {
             expected_supply_selloff = max_expected_supply_selloff;
         }
         
+        console.log("expected_supply_selloff:", expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
+        console.log("max_expected_supply_selloff:", max_expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
+
         // Calculate K_target from selloff expectations
         // K_target = sqrt(1 / expected_supply_selloff)
         console.log("K_target before being updated:", K_target.mul(uint256(1e40).fromUInt()).toUInt());
@@ -1017,9 +1049,11 @@ contract AlgoToken is ERC20 {
                 console.log("K after K_target sub   K: ", K.mul(uint256(100).fromUInt()).toUInt());
             }
 
-            if (K_Target_cmp_K >= 0)
-            // Update target market cap
-            target_Mcap = K.mul(f_slip).add(f_peg);
+            if (K_Target_cmp_K >= 0) {
+                // Update target market cap
+                target_Mcap = K.mul(f_slip).add(f_peg);
+            }
+            
             
         }
     }
