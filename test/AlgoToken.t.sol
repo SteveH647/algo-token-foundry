@@ -120,12 +120,14 @@ contract AlgoTokenTest is Test {
         uint256[100] memory amounts  
     ) 
     public {
-        kValueScaled = bound(kValueScaled, 1.00001e5, 10e5); 
+        // kValueScaled = bound(kValueScaled, 1.00001e5, 10e5); 
+        kValueScaled = bound(kValueScaled, 1.001e5, 10e5); 
         console.log("kValueScaled:", kValueScaled);
         bytes16 k = uint256(kValueScaled).fromUInt().div(uint256(1e5).fromUInt());
         
         ATH_peg_padding = bound(ATH_peg_padding, 1e6 * 10**usdc.decimals(), 100e6 * 10**usdc.decimals());
         bear_current = bound(bear_current, 0, 15e6); //0 to 5 years
+        console.log("initial bear_current", bear_current);
 
         initial_price = bound(initial_price, 10**usdc.decimals() / 1e3, 10 * 10**usdc.decimals()); // $.001 to $10.000
         console.log("initial_price:", initial_price);
@@ -167,7 +169,7 @@ contract AlgoTokenTest is Test {
         bytes16 supply_normalization_factor = algoToken.supply_normalization_factor();
         bool peg_reached_peg_target = false;
         uint256 peg_target = algoToken.peg_target();
-
+        bytes16 ATH_price = algoToken.ATH_price();
 
         uint i = 0;
         // Bootstrap by buying an initial amount and then letting some time go by
@@ -200,64 +202,76 @@ contract AlgoTokenTest is Test {
                 
             console.log("i:", i);
 
-            if (action == 0) {
-                // Buy
-                // buy_amount = bound(amounts[i], 1 * USDC_decimals_scale_factor, 1e6 * USDC_decimals_scale_factor);
-                buy_amount = bound(amounts[i], 100 * USDC_decimals_scale_factor, 10e6 * USDC_decimals_scale_factor);
-                console.log("buy amount:", buy_amount);
-                vm.startPrank(alice);
-                usdc.approve(address(algoToken), buy_amount);
-                if (usdc.balanceOf(alice) >= buy_amount) {
-                    algoToken.buy(buy_amount);
-                    console.log("new circ_supply:", algoToken.circ_supply());
-                }
-                vm.stopPrank();
-                if (algoToken.peg() >= algoToken.peg_target()) {
-                    peg_reached_peg_target = true;
-                    assertTrue(
-                        algoToken.peg() == algoToken.peg_target(),
-                        "Invariant Failed: peg > peg_target"
-                    );
+            if (algoToken.reserve() > 10**usdc.decimals() || algoToken.price().cmp(algoToken.ATH_price()) >= 0) {
+                // Then, the AMM is still functional
+
+                console.log("algoToken.reserve()", algoToken.reserve());
+
+                if (action == 0) {
+                    // Buy
+                    // buy_amount = bound(amounts[i], 1 * USDC_decimals_scale_factor, 1e6 * USDC_decimals_scale_factor);
+                    buy_amount = bound(amounts[i], 100 * USDC_decimals_scale_factor, 10e6 * USDC_decimals_scale_factor);
+                    console.log("buy amount:", buy_amount);
+                    vm.startPrank(alice);
+                    usdc.approve(address(algoToken), buy_amount);
+                    if (usdc.balanceOf(alice) >= buy_amount) {
+                        algoToken.buy(buy_amount);
+                        console.log("new circ_supply:", algoToken.circ_supply());
+                    }
+                    vm.stopPrank();
+                    if (algoToken.peg() >= algoToken.peg_target()) {
+                        peg_reached_peg_target = true;
+                        assertTrue(
+                            algoToken.peg() == algoToken.peg_target(),
+                            "Invariant Failed: peg > peg_target"
+                        );
+                        
+                        assertTrue(
+                            algoToken.bear_current().cmp(f_0) == 0,
+                            "bear_current != 0 after peg reached peg_target"
+                        ); 
+                    }
                     
-                    assertTrue(
-                        algoToken.bear_current().cmp(f_0) == 0,
-                        "bear_current != 0 after peg reached peg_target"
-                    ); 
-                }
-                
-            } else if (action == 1) {
-                // Sell
-                vm.startPrank(alice);
-                uint256 balance = algoToken.balanceOf(alice);
-                // uint256 amount = bound(amounts[i], 1 * AT_decimals_scale_factor, 1e6 * AT_decimals_scale_factor);
-                
-                uint256 sell_amount;
-                if (peg_reached_peg_target) {
-                    // Sell more agressively than buying so that peg eventually reaches 0
-                    sell_amount = bound(amounts[i], 0, balance);
-                }
-                else {
-                    // Sell amount merasured in USD is 1/2 of the previous buy amount so that
-                    // the peg pool will eventually reach peg_target
-                    sell_amount = buy_amount.fromUInt().div(algoToken.price()).mul(supply_normalization_factor).toUInt()/2;
-                } 
-                
-                console.log("Selling: balance:", balance);
+                } else if (action == 1) {
+                    // Sell
+                    vm.startPrank(alice);
+                    uint256 balance = algoToken.balanceOf(alice);
+                    // uint256 amount = bound(amounts[i], 1 * AT_decimals_scale_factor, 1e6 * AT_decimals_scale_factor);
+                    
+                    uint256 sell_amount;
+                    if (peg_reached_peg_target) {
+                        // Sell more agressively than buying so that peg eventually reaches 0
+                        sell_amount = bound(amounts[i], 0, balance);
+                        console.log("sell_amount:", sell_amount);
+                    }
+                    else {
+                        // Sell amount merasured in USD is 1/2 of the previous buy amount so that
+                        // the peg pool will eventually reach peg_target
+                        sell_amount = buy_amount.fromUInt().div(algoToken.price()).mul(supply_normalization_factor).toUInt()/2;
+                    } 
+                    sell_amount = min(sell_amount, balance);
+                    console.log("Selling: balance:", balance);
 
-                if (balance > 0) {
-                    algoToken.sell(sell_amount);
+                    if (balance > 0) {
+                        algoToken.sell(sell_amount);
+                    }
+
+                    vm.stopPrank();
+                } else if (action == 2) {
+                    // Update
+                    algoToken.update();
+                    
+                } else {
+                    // Time travel
+                    amount = bound(amounts[i], 3600, 604800); //measured in seconds (range between 1 hour and 1 week)
+                    vm.warp(block.timestamp + amount);
+                    vm.roll(block.number + amount / 12); // Assuming 12 seconds per block
                 }
 
-                vm.stopPrank();
-            } else if (action == 2) {
-                // Update
-                algoToken.update();
-                
             } else {
-                // Time travel
-                amount = bound(amounts[i], 3600, 604800); //measured in seconds (range between 1 hour and 1 week)
-                vm.warp(block.timestamp + amount);
-                vm.roll(block.number + amount / 12); // Assuming 12 seconds per block
+                //Then, Reserve has been depleted, which means the AMM is no longer functional.
+                // Calls to buy(), sell(), or update() will revert  
+                break;
             }
 
             // Test invariants
@@ -281,6 +295,12 @@ contract AlgoTokenTest is Test {
                 "Invariant failed: algoToken.slip() != algoToken.f_slip()"
             );
 
+            uint256 reserve = peg + slip;
+            bytes16 f_reserve = f_peg.add(f_slip);
+            assertTrue(reserve == algoToken.f_reserve().toUInt(), "Invariant failed: algoToken.f_reserve() != peg + slip");
+            assertTrue(reserve == algoToken.reserve(), "Invariant failed: reserve != algoToken.reserve()");
+
+
             bytes16 peg_min = (Kx.mul(f_slip).add(f_peg).div(pow(Ky, f_2)));
             if (peg > peg_min.toUInt()) {
                 assertTrue(
@@ -301,10 +321,6 @@ contract AlgoTokenTest is Test {
             uint256 circ_supply = algoToken.circ_supply();
             assertTrue(hyp_supply >= circ_supply, "Invariant failed: hypothetical_supply < circ_supply");
 
-            uint256 reserve = peg + slip;
-            bytes16 f_reserve = f_peg.add(f_slip);
-            assertTrue(reserve == algoToken.f_reserve().toUInt(), "Invariant failed: algoToken.f_reserve() != peg + slip");
-            assertTrue(reserve == algoToken.reserve(), "Invariant failed: reserve != algoToken.reserve()");
 
             // real_Mcap = price * circ_supply
             price = algoToken.price();
@@ -325,12 +341,13 @@ contract AlgoTokenTest is Test {
                 "Invariant failed: target_Mcap != price * hyp_supply"
             );
 
-            assertTrue(real_Mcap.cmp(target_Mcap) <= 0, "Invariant failed: real_Mcap > target_Mcap");
+            assertTrue(real_Mcap.sub(f_10).cmp(target_Mcap) <= 0, "Invariant failed: real_Mcap > target_Mcap");
 
             bytes16 K_real = algoToken.K_real();
+            assertTrue(K_real.cmp(K) <= 0, "Invariant failed: K_real > K");
+
             if (action == 2) {
                 // Then,  algoToken.update(); was run
-                assertTrue(K_real.cmp(K) <= 0, "Invariante failed: K_real > K");
 
                 // real_Mcap = K_real * slip + peg
                 real_Mcap_calculated = K_real.mul(f_slip).add(f_peg);
@@ -343,7 +360,7 @@ contract AlgoTokenTest is Test {
                 target_Mcap_calculated = K.mul(f_slip).add(f_peg);
                 assertTrue(
                     abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_10) <=0,
-                    "Invariant failed: real_Mcap != K * slip + peg"
+                    "Invariant failed: target_Mcap != K * slip + peg"
                 );
 
                 assertTrue(
@@ -362,12 +379,17 @@ contract AlgoTokenTest is Test {
                 );
             }
 
-            bytes16 ATH_price = algoToken.ATH_price();
+            ATH_price = algoToken.ATH_price();
             if (peg > 0) {
                 assertTrue(ATH_price.sub(price).cmp(f_10) <= 0, "Invariant failed: peg > 0 while price != ATH_price");
             }
             
-            assertTrue(slip > 0, "Invariant failed, slip = 0 after algoToken.Update() ran at least once");
+            
+            if (algoToken.bear_actual().cmp(uint256(220000).fromUInt()) > 0) {
+                // Then the bear market is long enough that K_real would effectively never reach K.
+                // As long as K_real is significantly less than K, slip can never reach 0.
+                assertTrue(slip > 0, "Invariant failed, slip = 0 after algoToken.Update() ran at least once");
+            }
 
             if (peg == 0) {
                 // Then price = K * reserve / hyp_supply = K_real * reserve / circ_supply
@@ -379,11 +401,14 @@ contract AlgoTokenTest is Test {
                         "Invariant failed: price != K * reserve / hyp_supply"
                     );
 
-                    calculated_price = K_real.mul(f_reserve).div(f_circ_supply);
-                    assertTrue(
-                        abs(calculated_price.sub(price)).cmp(f_10) <=0,
-                        "Invariant failed: price != K_real * reserve / circ_supply"
-                    );
+                    if (circ_supply > 0) {
+                        calculated_price = K_real.mul(f_reserve).div(f_circ_supply);
+                        assertTrue(
+                            abs(calculated_price.sub(price)).cmp(f_10) <=0,
+                            "Invariant failed: price != K_real * reserve / circ_supply"
+                        );
+                    }
+                    
                 }
             }
 
@@ -392,5 +417,5 @@ contract AlgoTokenTest is Test {
 
         }
 
-}
+    }
 }

@@ -441,6 +441,14 @@ contract AlgoToken is ERC20 {
     }
 
     // ============================================
+    // PRINT STRING FUNCTIONS
+    // ============================================
+
+    function scale(bytes16 input, uint256 scale_factor) private pure returns (uint256) {
+        return input.mul(scale_factor.fromUInt()).toUInt();
+    }
+
+    // ============================================
     // CORE AMM FUNCTIONS
     // ============================================
     
@@ -454,6 +462,13 @@ contract AlgoToken is ERC20 {
      * 4. Adjusts K values based on new market state
      */
     function buy(uint USD_amount) public {
+        console.log("slip:", slip);
+        console.log("reserve:", reserve);
+        require(
+            price.cmp(ATH_price) >= 0 || slip > 10**stableCoin.decimals(),
+            "slip = 0 rendering AMM non-functional"
+        );
+
         // Transfer will revert if user doesn't have funds or allowance
         stableCoin.transferFrom(msg.sender, address(this), USD_amount);
 
@@ -473,9 +488,13 @@ contract AlgoToken is ERC20 {
                 // Apply Bancor v1 formula to entire amount
                 
                 uint256 new_slip = slip + USD_remaining;
-                
+                console.log("new_slip:", new_slip);
+                console.log("slip:", slip);
+                console.log("K", scale(K, 1e30));
+
                 // Bancor v1: S/S0 = (R/R0)^(1/K)
                 // New supply = Old supply * (New reserve / Old reserve)^(1/K)
+                console.log("before Bancor v1 calculation");
                 new_hyp_supply = 
                 hypothetical_supply.fromUInt().mul(
                     pow(
@@ -483,6 +502,8 @@ contract AlgoToken is ERC20 {
                         f_1.div(K)
                     )
                 ).toUInt();
+
+                console.log("Bancor v1 calculation complete");
 
                 algos_to_mint = new_hyp_supply - hypothetical_supply;
                 slip = new_slip;
@@ -496,8 +517,12 @@ contract AlgoToken is ERC20 {
                 // Purchase will reach ATH price
                 // First, fill slip pool to exact ATH level
                 
+                console.log("ATH_price", scale(ATH_price, 1e30));
+                console.log("price", scale(price, 1e30));
                 price = ATH_price;
                 USD_remaining -= slip_that_reaches_ATH_price - slip;
+                console.log("slip_that_reaches_ATH_price", slip_that_reaches_ATH_price);
+                console.log("slip", slip);
                 
                 new_hyp_supply = 
                 hypothetical_supply.fromUInt().mul(
@@ -577,7 +602,10 @@ contract AlgoToken is ERC20 {
                         "expected_supply_selloff after end of major bear market", 
                         expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
                     console.log("K before updated at end of major bear market", K.mul(uint256(1e5).fromUInt()).toUInt());
-                    K = f_1.div(expected_supply_selloff).sqrt();
+                    K = min(f_1.div(expected_supply_selloff).sqrt(), uint256(100).fromUInt());
+                    K_target = max(K_target, K);
+                    console.log("K after updated at end of major bear market", K.mul(uint256(1e5).fromUInt()).toUInt());
+                    calculate_peg_min_safety_and_peg_target();
                 }
 
                 highest_actual_supply_selloff_of_current_bear_market = f_0;
@@ -600,6 +628,9 @@ contract AlgoToken is ERC20 {
         f_slip = slip.fromUInt();
         f_peg = peg.fromUInt();
         real_Mcap = price.mul(f_circ_supply);
+        console.log("real_Mcap = ", real_Mcap.toUInt());
+        console.log("circ_supply", circ_supply);
+
         idealized_Mcap = K_target.mul(f_slip).add(f_peg);
 
         target_Mcap = price.mul(f_hyp_supply);
@@ -610,7 +641,12 @@ contract AlgoToken is ERC20 {
         if (price_increased) {
             // Update K_real based on new market state
             // K_real = (Market Cap - Peg) / Slip
+            console.log("K_real after price increased but before being updated", K_real.mul(uint256(1e30).fromUInt()).toUInt());
             K_real = real_Mcap.sub(f_peg).div(f_slip);
+            // If K_real > K due to rounding error, round K_real downwards towards K
+            K_real = min(K_real, K);
+            console.log("K_real after price increased and after being updated", K_real.mul(uint256(1e30).fromUInt()).toUInt());
+            console.log("price_increased");
         }
 
         update_K_target();
@@ -632,15 +668,19 @@ contract AlgoToken is ERC20 {
      * 3. Updates K values based on actual selloff
      */
     function sell(uint algo_amount) public {
+
         // Transfer will revert if user doesn't have required token balance or allowance
         _burn(msg.sender, algo_amount);
+        console.log("burned");
 
         uint256 algos_remaining = algo_amount;
         uint USD_to_send = 0;
         bool price_decreased = false;
 
         // ========== SELL TO PEG POOL FIRST ==========
-        if (peg >= 0) {
+        if (peg > 0) {
+            console.log("peg > 0");
+
             uint256 algos_to_subtract;
             uint256 peg_decrease = price.mul(algos_remaining.fromUInt()).div(supply_normalization_factor).toUInt();
             
@@ -667,6 +707,8 @@ contract AlgoToken is ERC20 {
 
         // ========== SELL TO SLIP POOL IF PEG EMPTY ==========
         if (peg == 0) {
+            console.log("peg = 0, sell to slip pool");
+
             // Apply Bancor v1 formula for downward slippage
             uint256 new_hyp_supply = hypothetical_supply - algos_remaining;
 
@@ -680,35 +722,59 @@ contract AlgoToken is ERC20 {
 
             USD_to_send += slip - new_slip;
             slip = new_slip;
+            console.log("slip", slip);
             reserve = slip;
             hypothetical_supply = new_hyp_supply;
+            console.log("hypothetical_supply", hypothetical_supply);
             circ_supply -= algos_remaining;
+            console.log("circ_supply", circ_supply);
             algos_remaining = 0;
             f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
             f_reserve = reserve.fromUInt();
             price = K.mul(f_reserve.div(f_hyp_supply)); // P = K * R/S
+            console.log("price", price.toUInt());
             price_decreased = true;
         }
 
+        
         // Update market caps
         f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
+        console.log("f_hyp_supply", f_hyp_supply.mul(uint256(1e30).fromUInt()).toUInt());
         f_circ_supply = circ_supply.fromUInt().div(supply_normalization_factor);
+        console.log("f_circ_supply", f_circ_supply.mul(uint256(1e30).fromUInt()).toUInt());
         f_slip = slip.fromUInt();
         f_peg = peg.fromUInt();
         real_Mcap = price.mul(f_circ_supply);
         idealized_Mcap = K_target.mul(f_slip).add(f_peg);
         target_Mcap = price.mul(f_hyp_supply);
 
-        if (price_decreased) {
-            // Update K_real for new lower price
-            K_real = real_Mcap.div(f_slip);
+        if (slip > 0) {
+            // Then, the AMM is still functional.  Once slip == 0, 
+            // the AMM is completely empty and stops functioning because the bancor v1 formula
+            // relies on measuring the percentage change in slip.
+            // If slip is 0, then the percentage change is infinity.
+            // the smart contract would need to be redeployed/bootstrapped.
+            // The code in this if-block crashes if slip == 0.
+
+            if (price_decreased) {
+                // Update K_real for new lower price
+                console.log("K_real after price decreased but before being updated", K_real.mul(uint256(1e30).fromUInt()).toUInt());
+                K_real = real_Mcap.div(f_slip);
+                // If K_real > K due to rounding error, round K_real downwards towards K
+                K_real = min(K_real, K);
+                console.log("K_real after price decreased and after being updated", K_real.mul(uint256(1e30).fromUInt()).toUInt());
+                console.log("price_decreased");
+            }
+
+            update_K_target();
+            console.log("Update_K_target() completed");
+
+            // Update peg requirements
+            calculate_peg_min_drain();
+            console.log("calculate_peg_min_drain() completed");
+            calculate_demand_score_drainage();
+            console.log("calculate_demand_score_drainage() completed");
         }
-
-        update_K_target();
-
-        // Update peg requirements
-        calculate_peg_min_drain();
-        calculate_demand_score_drainage();
 
         // Complete the trade
         stableCoin.approve(address(this), USD_to_send);
@@ -725,6 +791,9 @@ contract AlgoToken is ERC20 {
      * 4. Increments bear market counters
      */
     function update() public {
+
+        //require(circ_supply > 0, "circ_supply = 0. run buy() first before running update().");
+        
         t_t0 = block.number - block_index_of_last_update;
         f_t_t0 = t_t0.fromUInt();
         f_peg = peg.fromUInt();
@@ -732,10 +801,13 @@ contract AlgoToken is ERC20 {
         f_reserve = reserve.fromUInt();
 
         console.log("t_t0", t_t0);
-        
-        if (t_t0 > 0 && circ_supply > 0) {
+         
+        if (t_t0 > 0 && real_Mcap.toUInt() >= 10 ** stableCoin.decimals()) {
             // At least 1 block has passed, do the update
             
+            console.log("K_real before update", K_real.mul(uint256(1e30).fromUInt()).toUInt());
+            console.log("K before update", K.mul(uint256(1e30).fromUInt()).toUInt());
+
             if (f_peg.cmp(peg_min_safety) > 0) {
                 console.log("drain_peg_into_slip()");
                 drain_peg_into_slip();
@@ -755,6 +827,9 @@ contract AlgoToken is ERC20 {
 
             console.log("increment_bear_current_and_manage_bear_estimate_and_bear_actual()");
             increment_bear_current_and_manage_bear_estimate_and_bear_actual();
+
+            console.log("K_real after update", K_real.mul(uint256(1e30).fromUInt()).toUInt());
+            console.log("K after update", K.mul(uint256(1e30).fromUInt()).toUInt());
         }
     }
 
@@ -894,6 +969,9 @@ contract AlgoToken is ERC20 {
         bytes16 K_K_real_0_div_e_t_t0_T = K_K_real0.div(e_t_t0_T);
         K_real = K.sub(K_K_real_0_div_e_t_t0_T);
         
+        // If K_real > K due to rounding error, round K_real downwards towards K
+        K_real = min(K_real, K);
+
         // Ensure no negative values from rounding
         f_slip = max(f_slip, f_0);
         f_peg = max(f_peg, f_0);
@@ -968,6 +1046,7 @@ contract AlgoToken is ERC20 {
         console.log("hello");
         //console.log("K", K.mul(uint256(1e5).fromUInt()).toUInt());
         bytes16 expected_supply_selloff_as_per_K = f_1.div(pow(K, f_2));
+        console.log("K", scale(K, 1e40));
         console.log("hello again");
         console.log("expected_supply_selloff_as_per_K", expected_supply_selloff_as_per_K.mul(uint256(1e40).fromUInt()).toUInt());
         expected_supply_selloff = min(expected_supply_selloff, expected_supply_selloff_as_per_K);
@@ -1094,10 +1173,10 @@ contract AlgoToken is ERC20 {
             console.log("tmp_f_slip.cmp(f_10) >= 0");
             // Update Kx and Ky
             Ky = min(K, K_target);
-            Kx = max(K_real, K_target);
+            Kx = max(K_real, Ky);
             console.log("K:", K.mul(uint256(100).fromUInt()).toUInt());
             console.log("K_target:", K_target.mul(uint256(100).fromUInt()).toUInt());
-            console.log("K_real:", K_real.mul(uint256(100).fromUInt()).toUInt());
+            console.log("K_real:", K_real.mul(uint256(1e30).fromUInt()).toUInt());
             console.log("Ky:", Ky.mul(uint256(100).fromUInt()).toUInt());
             console.log("Kx:", Kx.mul(uint256(100).fromUInt()).toUInt());
             
@@ -1194,11 +1273,23 @@ contract AlgoToken is ERC20 {
      * Peg exponentially approaches this level
      */
     function calculate_peg_min_drain() private {
-        f_reserve = reserve.fromUInt();
-        Ky = min(K, K_target);
-        Kx = max(K_real, Ky);
-        bytes16 Kx_reserve = Kx.mul(f_reserve);
+        console.log("inside calculate_peg_min_drain()");
         
+        f_reserve = reserve.fromUInt();
+        console.log("inside calculate_peg_min_drain(), after f_reserve");
+        Ky = min(K, K_target);
+        console.log("inside calculate_peg_min_drain(), after Ky");
+        console.log("calculate_peg_min_drain(), Ky:", Ky.mul(uint256(1e5).fromUInt()).toUInt());
+        console.log("calculate_peg_min_drain(), K_real:", K_real.mul(uint256(1e5).fromUInt()).toUInt());
+        Kx = max(K_real, Ky);
+        console.log("inside calculate_peg_min_drain(), after Kx");
+        console.log("calculate_peg_min_drain(), Kx:", Kx.mul(uint256(1e5).fromUInt()).toUInt());
+        bytes16 Kx_reserve = Kx.mul(f_reserve);
+        console.log("inside calculate_peg_min_drain(), after Kx_reserve");
+        console.log("calculate_peg_min_drain(), Kx_reserve:", Kx_reserve.mul(uint256(1e5).fromUInt()).toUInt());
+        
+        
+
         // peg_min_drain = Kx * reserve / (Ky^2 + Kx - 1)
         bytes16 Kt_Kt = Ky.mul(Ky);
         bytes16 Kt2_Kx_1 = Kt_Kt.add(Kx).sub(f_1);
