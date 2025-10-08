@@ -516,7 +516,7 @@ contract AlgoToken is ERC20 {
             else {
                 // Purchase will reach ATH price
                 // First, fill slip pool to exact ATH level
-                
+
                 console.log("ATH_price", scale(ATH_price, 1e30));
                 console.log("price", scale(price, 1e30));
                 price = ATH_price;
@@ -605,6 +605,8 @@ contract AlgoToken is ERC20 {
                     K = min(f_1.div(expected_supply_selloff).sqrt(), uint256(100).fromUInt());
                     K_target = max(K_target, K);
                     console.log("K after updated at end of major bear market", K.mul(uint256(1e5).fromUInt()).toUInt());
+                    
+                    // Since K possibly increases, we need to recalculate peg_min_safety
                     calculate_peg_min_safety_and_peg_target();
                 }
 
@@ -623,7 +625,7 @@ contract AlgoToken is ERC20 {
         }
 
         // Update all market cap calculations
-        f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
+        // f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
         f_circ_supply = circ_supply.fromUInt().div(supply_normalization_factor);
         f_slip = slip.fromUInt();
         f_peg = peg.fromUInt();
@@ -633,7 +635,10 @@ contract AlgoToken is ERC20 {
 
         idealized_Mcap = K_target.mul(f_slip).add(f_peg);
 
-        target_Mcap = price.mul(f_hyp_supply);
+        // target_Mcap = price.mul(f_hyp_supply);
+        target_Mcap = K.mul(f_slip).add(f_peg);
+        f_hyp_supply = target_Mcap.div(price);
+        hypothetical_supply = max(hypothetical_supply, f_hyp_supply.mul(supply_normalization_factor).toUInt());
         console.log("price = ", price.toUInt());
         console.log("target_Mcap = ", target_Mcap.toUInt());
         console.log("hypothetical_supply", hypothetical_supply);
@@ -711,6 +716,8 @@ contract AlgoToken is ERC20 {
 
             // Apply Bancor v1 formula for downward slippage
             uint256 new_hyp_supply = hypothetical_supply - algos_remaining;
+            console.log("new_hyp_supply", new_hyp_supply);
+            console.log("hypothetical_supply before sell slippage", hypothetical_supply);
 
             // R/R0 = (S/S0)^K
             uint256 new_slip = slip.fromUInt().mul(
@@ -738,15 +745,17 @@ contract AlgoToken is ERC20 {
 
         
         // Update market caps
-        f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
-        console.log("f_hyp_supply", f_hyp_supply.mul(uint256(1e30).fromUInt()).toUInt());
+        //f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
+        //console.log("f_hyp_supply", f_hyp_supply.mul(uint256(1e30).fromUInt()).toUInt());
         f_circ_supply = circ_supply.fromUInt().div(supply_normalization_factor);
         console.log("f_circ_supply", f_circ_supply.mul(uint256(1e30).fromUInt()).toUInt());
         f_slip = slip.fromUInt();
         f_peg = peg.fromUInt();
         real_Mcap = price.mul(f_circ_supply);
         idealized_Mcap = K_target.mul(f_slip).add(f_peg);
-        target_Mcap = price.mul(f_hyp_supply);
+        // target_Mcap = price.mul(f_hyp_supply);
+        target_Mcap = K.mul(f_slip).add(f_peg);
+        f_hyp_supply = target_Mcap.div(price);
 
         if (slip > 0) {
             // Then, the AMM is still functional.  Once slip == 0, 
@@ -963,6 +972,8 @@ contract AlgoToken is ERC20 {
     function grow_K_real_towards_K() private {
         // Exponential convergence: K_real = K - (K - K_real0) * e^(-(t-t0) / T)
         
+        console.log("bear_actual", bear_actual.toUInt());
+
         bytes16 K_K_real0 = K.sub(K_real);
         bytes16 t_t0_T = f_t_t0.div(bear_actual);
         bytes16 e_t_t0_T = t_t0_T.exp();
@@ -1081,7 +1092,7 @@ contract AlgoToken is ERC20 {
         // Calculate K_target from selloff expectations
         // K_target = sqrt(1 / expected_supply_selloff)
         console.log("K_target before being updated:", K_target.mul(uint256(1e40).fromUInt()).toUInt());
-        K_target = f_1.div(expected_supply_selloff).sqrt();
+        K_target = min(K_target, f_1.div(expected_supply_selloff).sqrt());
         console.log("K_target after being updated:", K_target.mul(uint256(1e40).fromUInt()).toUInt());
 
         idealized_Mcap = K_target.mul(f_slip).add(f_peg);

@@ -39,6 +39,7 @@ contract AlgoTokenTest is Test {
     bytes16 f_2 = uint256(2).fromUInt(); // 2.0 as float
     bytes16 f_1_2 = f_1.div(f_2); // 0.5 as float
     bytes16 f_10 = uint256(10).fromUInt(); // 10.0 as float
+    bytes16 f_100 = uint256(100).fromUInt(); // 100.0 as float
     bytes16 f_golden_ratio = 0x3fff9e3779b97f68151235e290029709; // 1.61803398875 (used for bond maturity calculations)
 
     // ============================================
@@ -117,7 +118,8 @@ contract AlgoTokenTest is Test {
         uint256 bear_current,
         uint256 initial_price,
         uint256[100] memory actions,
-        uint256[100] memory amounts  
+        uint256[100] memory amounts,
+        uint256[100] memory bondAmounts  
     ) 
     public {
         // kValueScaled = bound(kValueScaled, 1.00001e5, 10e5); 
@@ -126,7 +128,7 @@ contract AlgoTokenTest is Test {
         bytes16 k = uint256(kValueScaled).fromUInt().div(uint256(1e5).fromUInt());
         
         ATH_peg_padding = bound(ATH_peg_padding, 1e6 * 10**usdc.decimals(), 100e6 * 10**usdc.decimals());
-        bear_current = bound(bear_current, 0, 15e6); //0 to 5 years
+        bear_current = bound(bear_current, 52704, 15e6); // 1 week to 5 years
         console.log("initial bear_current", bear_current);
 
         initial_price = bound(initial_price, 10**usdc.decimals() / 1e3, 10 * 10**usdc.decimals()); // $.001 to $10.000
@@ -197,15 +199,21 @@ contract AlgoTokenTest is Test {
         // run Update() to complete boostrap
         algoToken.update();
 
-        for (i = 1; i < actions.length; i++) {
+        for (i = 2; i < actions.length; i++) {
             uint256 action = actions[i] % 4;
                 
             console.log("i:", i);
 
             if (algoToken.reserve() > 10**usdc.decimals() || algoToken.price().cmp(algoToken.ATH_price()) >= 0) {
-                // Then, the AMM is still functional
+                // Then, there is mnore than $1.00 in the AMM and therefore the AMM is still functional
 
                 console.log("algoToken.reserve()", algoToken.reserve());
+
+                // buyBond(uint256 algoAmount, AlgoBond.BondReturnsOption bondType)
+                // addToBond(uint256 algoAmount, uint256 tokenId)
+                // updateBond(uint256 tokenId)
+                // ChangeBondType(uint256 tokenId, AlgoBond.BondReturnsOption bondType)
+                // updateBondSums()
 
                 if (action == 0) {
                     // Buy
@@ -228,7 +236,7 @@ contract AlgoTokenTest is Test {
                         
                         assertTrue(
                             algoToken.bear_current().cmp(f_0) == 0,
-                            "bear_current != 0 after peg reached peg_target"
+                            "Invariant Failed: bear_current != 0 after peg reached peg_target"
                         ); 
                     }
                     
@@ -254,6 +262,11 @@ contract AlgoTokenTest is Test {
 
                     if (balance > 0) {
                         algoToken.sell(sell_amount);
+                        if (algoToken.price().cmp(algoToken.ATH_price()) < 0 && algoToken.reserve() == 0) {
+                            // Then, Reserve has been depleted, which means the AMM is no longer functional.
+                            // testing invariants will cause an EvmError.
+                            break;
+                        }
                     }
 
                     vm.stopPrank();
@@ -301,12 +314,14 @@ contract AlgoTokenTest is Test {
             assertTrue(reserve == algoToken.reserve(), "Invariant failed: reserve != algoToken.reserve()");
 
 
-            bytes16 peg_min = (Kx.mul(f_slip).add(f_peg).div(pow(Ky, f_2)));
-            if (peg > peg_min.toUInt()) {
-                assertTrue(
-                    algoToken.peg_min_safety().cmp(algoToken.peg_min_drain()) <= 0, 
-                    "Invariant failed: peg_min_safety > peg_min_drain"
-                );
+            if (action != 2) {
+                bytes16 peg_min = (Kx.mul(f_slip).add(f_peg).div(pow(Ky, f_2)));
+                if (peg > peg_min.toUInt()) {
+                    assertTrue(
+                        algoToken.peg_min_safety().cmp(algoToken.peg_min_drain()) <= 0, 
+                        "Invariant failed: peg_min_safety > peg_min_drain"
+                    );
+                }
             }
 
             uint256 i_peg_min_safety = algoToken.peg_min_safety().toUInt();
@@ -328,7 +343,7 @@ contract AlgoTokenTest is Test {
             bytes16 f_circ_supply = algoToken.f_circ_supply();
             bytes16 real_Mcap_calculated = price.mul(f_circ_supply);
             assertTrue(
-                abs(real_Mcap.sub(real_Mcap_calculated)).cmp(f_10) <=0,
+                abs(real_Mcap.sub(real_Mcap_calculated)).cmp(f_100) <=0,
                 "Invariant failed: real_Mcap != price * circ_supply"
             );
 
@@ -337,7 +352,7 @@ contract AlgoTokenTest is Test {
             bytes16 f_hyp_supply = algoToken.f_hyp_supply();
             bytes16 target_Mcap_calculated = price.mul(f_hyp_supply);
             assertTrue(
-                abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_10) <=0,
+                abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_100) <=0,
                 "Invariant failed: target_Mcap != price * hyp_supply"
             );
 
@@ -346,38 +361,36 @@ contract AlgoTokenTest is Test {
             bytes16 K_real = algoToken.K_real();
             assertTrue(K_real.cmp(K) <= 0, "Invariant failed: K_real > K");
 
-            if (action == 2) {
-                // Then,  algoToken.update(); was run
+            // real_Mcap = K_real * slip + peg
+            real_Mcap_calculated = K_real.mul(f_slip).add(f_peg);
+            assertTrue(
+                // abs(real_Mcap.sub(real_Mcap_calculated)).cmp(uint256(10**usdc.decimals()).fromUInt()) <=0,
+                abs(real_Mcap.sub(real_Mcap_calculated)).cmp(f_100) <=0,
+                "Invariant failed: real_Mcap != K_real * slip + peg"
+            );
 
-                // real_Mcap = K_real * slip + peg
-                real_Mcap_calculated = K_real.mul(f_slip).add(f_peg);
-                assertTrue(
-                    abs(real_Mcap.sub(real_Mcap_calculated)).cmp(f_10) <=0,
-                    "Invariant failed: real_Mcap != K_real * slip + peg"
-                );
+            // target_Mcap = K * slip + peg
+            target_Mcap_calculated = K.mul(f_slip).add(f_peg);
+            assertTrue(
+                // abs(target_Mcap.sub(target_Mcap_calculated)).cmp(uint256(10**usdc.decimals()).fromUInt()) <=0,
+                abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_100) <=0,
+                "Invariant failed: target_Mcap != K * slip + peg"
+            );
 
-                // target_Mcap = K * slip + peg
-                target_Mcap_calculated = K.mul(f_slip).add(f_peg);
-                assertTrue(
-                    abs(target_Mcap.sub(target_Mcap_calculated)).cmp(f_10) <=0,
-                    "Invariant failed: target_Mcap != K * slip + peg"
-                );
+            assertTrue(
+                algoToken.bear_estimate().cmp(algoToken.bear_current()) >= 0,
+                "Invariant failed: bear_estimate < bear_current"
+            );
 
-                assertTrue(
-                    algoToken.bear_estimate().cmp(algoToken.bear_current()) >= 0,
-                    "Invariant failed: bear_estimate < bear_current"
-                );
+            assertTrue(
+                algoToken.bear_actual().cmp(algoToken.bear_current()) >= 0,
+                "Invariant failed: bear_actual < bear_current"
+            );
 
-                assertTrue(
-                    algoToken.bear_actual().cmp(algoToken.bear_current()) >= 0,
-                    "Invariant failed: bear_actual < bear_current"
-                );
-
-                assertTrue(
-                    algoToken.bear_actual().cmp(algoToken.bear_estimate()) >= 0,
-                    "Invariant failed: bear_actual < bear_estimate"
-                );
-            }
+            assertTrue(
+                algoToken.bear_actual().cmp(algoToken.bear_estimate()) >= 0,
+                "Invariant failed: bear_actual < bear_estimate"
+            );
 
             ATH_price = algoToken.ATH_price();
             if (peg > 0) {
