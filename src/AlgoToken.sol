@@ -37,6 +37,9 @@ contract AlgoToken is ERC20 {
     ERC20 public stableCoin; // The USD-pegged token held in reserves (e.g., USDC, DAI)
     AlgoBond public algoBond; // NFT bond contract for locking AlgoTokens
 
+    // algoBond contract can only be set once
+    bool public algoBondSet = false;
+
     // ============================================
     // MATHEMATICAL CONSTANTS (bytes16 = quadruple precision float)
     // ============================================
@@ -331,10 +334,7 @@ contract AlgoToken is ERC20 {
      * @param price_ starting price
      * @param name_ Token name
      * @param symbol_ Token symbol
-     * @param algoBond_Name_ Bond NFT name
-     * @param algoBond_Symbol_ Bond NFT symbol
      * @param input_stableCoin input USD stablecoin for reserves
-     * @param bondPortionAtMaturity_ Threshold for bond acceleration
      * @param minimum_block_length_between_bondSum_updates_ Min blocks between updates
      */
     constructor(
@@ -344,10 +344,7 @@ contract AlgoToken is ERC20 {
         uint256 price_,
         string memory name_,
         string memory symbol_,
-        string memory algoBond_Name_,
-        string memory algoBond_Symbol_,
         ERC20 input_stableCoin,
-        bytes16 bondPortionAtMaturity_,
         uint256 minimum_block_length_between_bondSum_updates_
     )
     ERC20 (name_, symbol_) 
@@ -364,8 +361,6 @@ contract AlgoToken is ERC20 {
         // Initialize leverage constants
         K = K_;
         K_target = K_;
-        console.log("Constructor: K", K.mul(uint256(100).fromUInt()).toUInt());
-        console.log("Constructor: K_target", K_target.mul(uint256(100).fromUInt()).toUInt());
         Ky = min(K, K_target);
         Kx = max(K_real, Ky);
         
@@ -375,10 +370,10 @@ contract AlgoToken is ERC20 {
         highest_actual_supply_selloff_of_current_bear_market = expected_supply_selloff;
 
         // Set bond parameters
-        bondPortionAtMaturity = bondPortionAtMaturity_;
+        // bondPortionAtMaturity = bondPortionAtMaturity_;
 
         // Deploy bond contract
-        algoBond = new AlgoBond(algoBond_Name_, algoBond_Symbol_, address(this), bondPortionAtMaturity_);
+        // algoBond = new AlgoBond(algoBond_Name_, algoBond_Symbol_, address(this), bondPortionAtMaturity_);
         
         // Set stablecoin
         stableCoin = input_stableCoin;
@@ -462,8 +457,6 @@ contract AlgoToken is ERC20 {
      * 4. Adjusts K values based on new market state
      */
     function buy(uint USD_amount) public {
-        console.log("slip:", slip);
-        console.log("reserve:", reserve);
         require(
             price.cmp(ATH_price) >= 0 || slip > 10**stableCoin.decimals(),
             "slip = 0 rendering AMM non-functional"
@@ -488,13 +481,9 @@ contract AlgoToken is ERC20 {
                 // Apply Bancor v1 formula to entire amount
                 
                 uint256 new_slip = slip + USD_remaining;
-                console.log("new_slip:", new_slip);
-                console.log("slip:", slip);
-                console.log("K", scale(K, 1e30));
 
                 // Bancor v1: S/S0 = (R/R0)^(1/K)
                 // New supply = Old supply * (New reserve / Old reserve)^(1/K)
-                console.log("before Bancor v1 calculation");
                 new_hyp_supply = 
                 hypothetical_supply.fromUInt().mul(
                     pow(
@@ -503,7 +492,6 @@ contract AlgoToken is ERC20 {
                     )
                 ).toUInt();
 
-                console.log("Bancor v1 calculation complete");
 
                 algos_to_mint = new_hyp_supply - hypothetical_supply;
                 slip = new_slip;
@@ -517,12 +505,8 @@ contract AlgoToken is ERC20 {
                 // Purchase will reach ATH price
                 // First, fill slip pool to exact ATH level
 
-                console.log("ATH_price", scale(ATH_price, 1e30));
-                console.log("price", scale(price, 1e30));
                 price = ATH_price;
                 USD_remaining -= slip_that_reaches_ATH_price - slip;
-                console.log("slip_that_reaches_ATH_price", slip_that_reaches_ATH_price);
-                console.log("slip", slip);
                 
                 new_hyp_supply = 
                 hypothetical_supply.fromUInt().mul(
@@ -543,9 +527,7 @@ contract AlgoToken is ERC20 {
         }
 
         // ========== PRICE AT ATH - PEG POOL TRADING ==========
-        console.log("ATH_price before price.cmp(ATH_price)", ATH_price.toUInt());
         if (price.cmp(ATH_price) >= 0) {
-            console.log("price.cmp(ATH_price) >= 0");
             // Price has reached ATH
             // Remaining USD goes into peg pool with zero slippage
             
@@ -559,13 +541,9 @@ contract AlgoToken is ERC20 {
             ));
 
             // Mint tokens at ATH price
-            console.log("USD_remaining:", USD_remaining);
             uint256 algos_to_add_to_mint = USD_remaining.fromUInt().div(price).mul(supply_normalization_factor).toUInt();
-            console.log("algos_to_add_to_mint:", algos_to_add_to_mint);
             algos_to_mint += algos_to_add_to_mint;
-            console.log("hypothetical_supply before adding algos_to_add_to_mint:", hypothetical_supply);
             hypothetical_supply += algos_to_add_to_mint;
-            console.log("hypothetical_supply after adding algos_to_add_to_mint:", hypothetical_supply);
             circ_supply += algos_to_add_to_mint;
             
             // Check if bear market has ended
@@ -580,31 +558,13 @@ contract AlgoToken is ERC20 {
                 // Check if this was a "major" bear market
                 if (bear_current.add(f_10).cmp(bear_estimate) >= 0) { 
                     // Update our bear market benchmarks
-                    console.log("bear_actual before updating", bear_actual.toUInt());
-                    console.log("bear_estimate before updating", bear_estimate.toUInt());
-                    console.log("bear_current", bear_current.toUInt());
                     bear_actual = bear_current;
                     bear_estimate = bear_current;
-                    console.log(
-                        "highest_actual_supply_selloff_of_current_bear_market", 
-                        highest_actual_supply_selloff_of_current_bear_market.mul(uint256(1e40).fromUInt()).toUInt()
-                    );
-                    console.log(
-                        "expected_supply_selloff before updated to highest_actual_supply_selloff_of_current_bear_market", 
-                        expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt()
-                    );
                     expected_supply_selloff = highest_actual_supply_selloff_of_current_bear_market;
                     // Cap at maximum allowed
                     if (expected_supply_selloff.cmp(max_expected_supply_selloff) > 0) {
                         expected_supply_selloff = max_expected_supply_selloff;
                     }
-                    console.log(
-                        "expected_supply_selloff after end of major bear market", 
-                        expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
-                    console.log("K before updated at end of major bear market", K.mul(uint256(1e5).fromUInt()).toUInt());
-                    K = min(f_1.div(expected_supply_selloff).sqrt(), uint256(100).fromUInt());
-                    K_target = max(K_target, K);
-                    console.log("K after updated at end of major bear market", K.mul(uint256(1e5).fromUInt()).toUInt());
                     
                     // Since K possibly increases, we need to recalculate peg_min_safety
                     calculate_peg_min_safety_and_peg_target();
@@ -630,8 +590,6 @@ contract AlgoToken is ERC20 {
         f_slip = slip.fromUInt();
         f_peg = peg.fromUInt();
         real_Mcap = price.mul(f_circ_supply);
-        console.log("real_Mcap = ", real_Mcap.toUInt());
-        console.log("circ_supply", circ_supply);
 
         idealized_Mcap = K_target.mul(f_slip).add(f_peg);
 
@@ -639,19 +597,13 @@ contract AlgoToken is ERC20 {
         target_Mcap = K.mul(f_slip).add(f_peg);
         f_hyp_supply = target_Mcap.div(price);
         hypothetical_supply = max(hypothetical_supply, f_hyp_supply.mul(supply_normalization_factor).toUInt());
-        console.log("price = ", price.toUInt());
-        console.log("target_Mcap = ", target_Mcap.toUInt());
-        console.log("hypothetical_supply", hypothetical_supply);
 
         if (price_increased) {
             // Update K_real based on new market state
             // K_real = (Market Cap - Peg) / Slip
-            console.log("K_real after price increased but before being updated", K_real.mul(uint256(1e30).fromUInt()).toUInt());
             K_real = real_Mcap.sub(f_peg).div(f_slip);
             // If K_real > K due to rounding error, round K_real downwards towards K
             K_real = min(K_real, K);
-            console.log("K_real after price increased and after being updated", K_real.mul(uint256(1e30).fromUInt()).toUInt());
-            console.log("price_increased");
         }
 
         update_K_target();
@@ -676,7 +628,6 @@ contract AlgoToken is ERC20 {
 
         // Transfer will revert if user doesn't have required token balance or allowance
         _burn(msg.sender, algo_amount);
-        console.log("burned");
 
         uint256 algos_remaining = algo_amount;
         uint USD_to_send = 0;
@@ -684,7 +635,6 @@ contract AlgoToken is ERC20 {
 
         // ========== SELL TO PEG POOL FIRST ==========
         if (peg > 0) {
-            console.log("peg > 0");
 
             uint256 algos_to_subtract;
             uint256 peg_decrease = price.mul(algos_remaining.fromUInt()).div(supply_normalization_factor).toUInt();
@@ -712,12 +662,9 @@ contract AlgoToken is ERC20 {
 
         // ========== SELL TO SLIP POOL IF PEG EMPTY ==========
         if (peg == 0) {
-            console.log("peg = 0, sell to slip pool");
 
             // Apply Bancor v1 formula for downward slippage
             uint256 new_hyp_supply = hypothetical_supply - algos_remaining;
-            console.log("new_hyp_supply", new_hyp_supply);
-            console.log("hypothetical_supply before sell slippage", hypothetical_supply);
 
             // R/R0 = (S/S0)^K
             uint256 new_slip = slip.fromUInt().mul(
@@ -729,26 +676,20 @@ contract AlgoToken is ERC20 {
 
             USD_to_send += slip - new_slip;
             slip = new_slip;
-            console.log("slip", slip);
             reserve = slip;
             hypothetical_supply = new_hyp_supply;
-            console.log("hypothetical_supply", hypothetical_supply);
             circ_supply -= algos_remaining;
-            console.log("circ_supply", circ_supply);
             algos_remaining = 0;
             f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
             f_reserve = reserve.fromUInt();
             price = K.mul(f_reserve.div(f_hyp_supply)); // P = K * R/S
-            console.log("price", price.toUInt());
             price_decreased = true;
         }
 
         
         // Update market caps
         //f_hyp_supply = hypothetical_supply.fromUInt().div(supply_normalization_factor);
-        //console.log("f_hyp_supply", f_hyp_supply.mul(uint256(1e30).fromUInt()).toUInt());
         f_circ_supply = circ_supply.fromUInt().div(supply_normalization_factor);
-        console.log("f_circ_supply", f_circ_supply.mul(uint256(1e30).fromUInt()).toUInt());
         f_slip = slip.fromUInt();
         f_peg = peg.fromUInt();
         real_Mcap = price.mul(f_circ_supply);
@@ -767,22 +708,16 @@ contract AlgoToken is ERC20 {
 
             if (price_decreased) {
                 // Update K_real for new lower price
-                console.log("K_real after price decreased but before being updated", K_real.mul(uint256(1e30).fromUInt()).toUInt());
                 K_real = real_Mcap.div(f_slip);
                 // If K_real > K due to rounding error, round K_real downwards towards K
                 K_real = min(K_real, K);
-                console.log("K_real after price decreased and after being updated", K_real.mul(uint256(1e30).fromUInt()).toUInt());
-                console.log("price_decreased");
             }
 
             update_K_target();
-            console.log("Update_K_target() completed");
 
             // Update peg requirements
             calculate_peg_min_drain();
-            console.log("calculate_peg_min_drain() completed");
             calculate_demand_score_drainage();
-            console.log("calculate_demand_score_drainage() completed");
         }
 
         // Complete the trade
@@ -808,14 +743,9 @@ contract AlgoToken is ERC20 {
         f_peg = peg.fromUInt();
         f_slip = slip.fromUInt();
         f_reserve = reserve.fromUInt();
-
-        console.log("t_t0", t_t0);
          
         if (t_t0 > 0 && real_Mcap.toUInt() >= 10 ** stableCoin.decimals()) {
             // At least 1 block has passed, do the update
-            
-            console.log("K_real before update", K_real.mul(uint256(1e30).fromUInt()).toUInt());
-            console.log("K before update", K.mul(uint256(1e30).fromUInt()).toUInt());
 
             if (f_peg.cmp(peg_min_safety) > 0) {
                 console.log("drain_peg_into_slip()");
@@ -837,8 +767,6 @@ contract AlgoToken is ERC20 {
             console.log("increment_bear_current_and_manage_bear_estimate_and_bear_actual()");
             increment_bear_current_and_manage_bear_estimate_and_bear_actual();
 
-            console.log("K_real after update", K_real.mul(uint256(1e30).fromUInt()).toUInt());
-            console.log("K after update", K.mul(uint256(1e30).fromUInt()).toUInt());
         }
     }
 
@@ -971,8 +899,6 @@ contract AlgoToken is ERC20 {
      */
     function grow_K_real_towards_K() private {
         // Exponential convergence: K_real = K - (K - K_real0) * e^(-(t-t0) / T)
-        
-        console.log("bear_actual", bear_actual.toUInt());
 
         bytes16 K_K_real0 = K.sub(K_real);
         bytes16 t_t0_T = f_t_t0.div(bear_actual);
@@ -1054,23 +980,14 @@ contract AlgoToken is ERC20 {
         console.log("expected_supply_selloff algos locked in bonds:", expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
         
         // Cap at K-implied selloff
-        console.log("hello");
         //console.log("K", K.mul(uint256(1e5).fromUInt()).toUInt());
         bytes16 expected_supply_selloff_as_per_K = f_1.div(pow(K, f_2));
-        console.log("K", scale(K, 1e40));
-        console.log("hello again");
-        console.log("expected_supply_selloff_as_per_K", expected_supply_selloff_as_per_K.mul(uint256(1e40).fromUInt()).toUInt());
         expected_supply_selloff = min(expected_supply_selloff, expected_supply_selloff_as_per_K);
-        console.log("expected_supply_selloff after min check", expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
 
         // Check actual selloff
         bytes16 actual_supply_selloff = f_1.sub(
             circ_supply.fromUInt().div(f_highest_circ_supply_since_bear_end)
         );
-
-        console.log("circ_supply", circ_supply);
-        console.log("highest_circ_supply_since_bear_end", highest_circ_supply_since_bear_end);
-        console.log("actual_supply_selloff:", actual_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
 
         if (actual_supply_selloff.cmp(highest_actual_supply_selloff_of_current_bear_market) > 0) {
             highest_actual_supply_selloff_of_current_bear_market = actual_supply_selloff;
@@ -1085,15 +1002,10 @@ contract AlgoToken is ERC20 {
         if (expected_supply_selloff.cmp(max_expected_supply_selloff) > 0) {
             expected_supply_selloff = max_expected_supply_selloff;
         }
-        
-        console.log("expected_supply_selloff:", expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
-        console.log("max_expected_supply_selloff:", max_expected_supply_selloff.mul(uint256(1e40).fromUInt()).toUInt());
 
         // Calculate K_target from selloff expectations
         // K_target = sqrt(1 / expected_supply_selloff)
-        console.log("K_target before being updated:", K_target.mul(uint256(1e40).fromUInt()).toUInt());
         K_target = min(K_target, f_1.div(expected_supply_selloff).sqrt());
-        console.log("K_target after being updated:", K_target.mul(uint256(1e40).fromUInt()).toUInt());
 
         idealized_Mcap = K_target.mul(f_slip).add(f_peg);
     }
@@ -1109,19 +1021,13 @@ contract AlgoToken is ERC20 {
             if (real_Mcap_peg.cmp(f_10) >= 0) {
                 K_real = real_Mcap_peg.div(f_slip);
             }
-            
-            console.log("K_target before if: ", K_target.mul(uint256(100000000000).fromUInt()).toUInt());
-            console.log("K before if: ", K.mul(uint256(100000000000).fromUInt()).toUInt());
-            console.log("K_target.cmp(K)",K_target.cmp(K));
 
             if (K_target.cmp(K) < 0) {
                 // Conservative mode: K decreases from drainage
                 // Target market cap stays constant
                 bytes16 target_Mcap_peg = target_Mcap.sub(f_peg);
                 if (target_Mcap_peg.cmp(f_10) >= 0) {
-                    console.log("target_Mcap_peg.cmp(f_10) >= 0.   K before: ", K.mul(uint256(100).fromUInt()).toUInt());
                     K = max(K_target, target_Mcap_peg.div(f_slip)); // Do not decrease K below K_Target
-                    console.log("target_Mcap_peg.cmp(f_10) >= 0.   K after: ", K.mul(uint256(100).fromUInt()).toUInt());
                 }
             }
 
@@ -1132,11 +1038,9 @@ contract AlgoToken is ERC20 {
                 bytes16 f_Kt_minus_K0 = K_target.sub(K);
                 bytes16 f_Ta_Kt_div_K0 = bear_actual.mul(K_target.div(K));
                 bytes16 f_exponent = f_t_t0.div(f_Ta_Kt_div_K0);
-                console.log("K before K_target sub   K: ", K.mul(uint256(100).fromUInt()).toUInt());
                 K = K_target.sub(
                     f_Kt_minus_K0.div(f_exponent.exp())
                 );
-                console.log("K after K_target sub   K: ", K.mul(uint256(100).fromUInt()).toUInt());
             }
 
             if (K_Target_cmp_K >= 0) {
@@ -1156,8 +1060,6 @@ contract AlgoToken is ERC20 {
         bytes16 tmp_f_slip;
         
         if (ATH_price.sub(price).cmp(f_10) <= 0) {
-            console.log("ATH_price.sub(price).cmp(f_10) <= 0");
-            console.log("f_slip:", f_slip.toUInt());
             //console.log("f_slip = %s", f_slip);
             // At ATH price
             slip_that_reaches_ATH_price = slip;
@@ -1166,7 +1068,6 @@ contract AlgoToken is ERC20 {
             //console.log("tmp_f_slip = %s", tmp_f_slip);
         }
         else {
-            console.log("ELSE OF: ATH_price.sub(price).cmp(f_10) <= 0");
             // Below ATH - calculate slip needed to reach it
             // Uses Bancor formula: R = R0 * (P_ATH/P)^(1/(1-1/K))
             slip_that_reaches_ATH_price = 
@@ -1181,24 +1082,15 @@ contract AlgoToken is ERC20 {
         }
         
         if (tmp_f_slip.cmp(f_10) >= 0) {
-            console.log("tmp_f_slip.cmp(f_10) >= 0");
             // Update Kx and Ky
             Ky = min(K, K_target);
             Kx = max(K_real, Ky);
-            console.log("K:", K.mul(uint256(100).fromUInt()).toUInt());
-            console.log("K_target:", K_target.mul(uint256(100).fromUInt()).toUInt());
-            console.log("K_real:", K_real.mul(uint256(1e30).fromUInt()).toUInt());
-            console.log("Ky:", Ky.mul(uint256(100).fromUInt()).toUInt());
-            console.log("Kx:", Kx.mul(uint256(100).fromUInt()).toUInt());
-            
+
             // Calculate minimum safe peg size
             // peg_min_safety = Kx * slip / (Ky^2 - 1)
-
             peg_min_safety = Kx.mul(tmp_f_slip).div(Ky.mul(Ky).sub(f_1));
-            console.log("peg_min_safety:", peg_min_safety.toUInt());
         }
         else {
-            console.log("ELSE OF: tmp_f_slip.cmp(f_10) >= 0");
             peg_min_safety = f_0;
         }
         
@@ -1284,22 +1176,11 @@ contract AlgoToken is ERC20 {
      * Peg exponentially approaches this level
      */
     function calculate_peg_min_drain() private {
-        console.log("inside calculate_peg_min_drain()");
-        
+
         f_reserve = reserve.fromUInt();
-        console.log("inside calculate_peg_min_drain(), after f_reserve");
         Ky = min(K, K_target);
-        console.log("inside calculate_peg_min_drain(), after Ky");
-        console.log("calculate_peg_min_drain(), Ky:", Ky.mul(uint256(1e5).fromUInt()).toUInt());
-        console.log("calculate_peg_min_drain(), K_real:", K_real.mul(uint256(1e5).fromUInt()).toUInt());
         Kx = max(K_real, Ky);
-        console.log("inside calculate_peg_min_drain(), after Kx");
-        console.log("calculate_peg_min_drain(), Kx:", Kx.mul(uint256(1e5).fromUInt()).toUInt());
         bytes16 Kx_reserve = Kx.mul(f_reserve);
-        console.log("inside calculate_peg_min_drain(), after Kx_reserve");
-        console.log("calculate_peg_min_drain(), Kx_reserve:", Kx_reserve.mul(uint256(1e5).fromUInt()).toUInt());
-        
-        
 
         // peg_min_drain = Kx * reserve / (Ky^2 + Kx - 1)
         bytes16 Kt_Kt = Ky.mul(Ky);
@@ -1324,121 +1205,127 @@ contract AlgoToken is ERC20 {
         return circ_supply;
     }
 
-    // ============================================
-    // BOND FUNCTIONS
-    // ============================================
+    // // ============================================
+    // // BOND FUNCTIONS
+    // // ============================================
+
+    function setAlgoBondContract(AlgoBond algoBond_) external {
+        require(!algoBondSet, "AlgoBond already set");
+        algoBond = algoBond_;
+        algoBondSet = true;
+    }
     
-    /**
-     * @dev Buy a bond by locking AlgoTokens
-     * @param algoAmount Amount of AlgoTokens to lock
-     * @param bondType Type of bond (DECAY, GAINSONLY, or REINVEST)
-     */
-    function buyBond(uint256 algoAmount, AlgoBond.BondReturnsOption bondType) public {
-        transferFrom(msg.sender, address(this), algoAmount);
-        algoBond.mint(msg.sender, algoAmount, bondType);
-        update_K_target();
-    }
+    // /**
+    //  * @dev Buy a bond by locking AlgoTokens
+    //  * @param algoAmount Amount of AlgoTokens to lock
+    //  * @param bondType Type of bond (DECAY, GAINSONLY, or REINVEST)
+    //  */
+    // function buyBond(uint256 algoAmount, AlgoBond.BondReturnsOption bondType) public {
+    //     transferFrom(msg.sender, address(this), algoAmount);
+    //     algoBond.mint(msg.sender, algoAmount, bondType);
+    //     update_K_target();
+    // }
 
-    /**
-     * @dev Add more AlgoTokens to an existing bond
-     * @param algoAmount Amount to add
-     * @param tokenId Bond NFT ID
-     */
-    function addToBond(uint256 algoAmount, uint256 tokenId) public {
-        transferFrom(msg.sender, address(this), algoAmount);
-        uint256 algosToPayOut = algoBond.addToBond(tokenId, algoAmount);
-        int256 netAlgosToPayOut = int256(algoAmount) - int256(algosToPayOut);
+    // /**
+    //  * @dev Add more AlgoTokens to an existing bond
+    //  * @param algoAmount Amount to add
+    //  * @param tokenId Bond NFT ID
+    //  */
+    // function addToBond(uint256 algoAmount, uint256 tokenId) public {
+    //     transferFrom(msg.sender, address(this), algoAmount);
+    //     uint256 algosToPayOut = algoBond.addToBond(tokenId, algoAmount);
+    //     int256 netAlgosToPayOut = int256(algoAmount) - int256(algosToPayOut);
         
-        if (netAlgosToPayOut > 0) {
-            transferFrom(address(this), msg.sender, uint256(netAlgosToPayOut));
-        }
-        else if (netAlgosToPayOut < 0) {
-            transferFrom(msg.sender, address(this), uint256(-netAlgosToPayOut));
-        }
+    //     if (netAlgosToPayOut > 0) {
+    //         transferFrom(address(this), msg.sender, uint256(netAlgosToPayOut));
+    //     }
+    //     else if (netAlgosToPayOut < 0) {
+    //         transferFrom(msg.sender, address(this), uint256(-netAlgosToPayOut));
+    //     }
         
-        update_K_target();
-    }
+    //     update_K_target();
+    // }
 
-    /**
-     * @dev Update a bond to claim accumulated gains
-     * @param tokenId Bond NFT ID
-     */
-    function updateBond(uint256 tokenId) public {
-        require(msg.sender == algoBond.ownerOf(tokenId));
+    // /**
+    //  * @dev Update a bond to claim accumulated gains
+    //  * @param tokenId Bond NFT ID
+    //  */
+    // function updateBond(uint256 tokenId) public {
+    //     require(msg.sender == algoBond.ownerOf(tokenId));
         
-        uint256 algosToPayOut = algoBond.updateBond(tokenId);
+    //     uint256 algosToPayOut = algoBond.updateBond(tokenId);
         
-        if (algosToPayOut > 0) {
-            transfer(msg.sender, algosToPayOut);
-        }
+    //     if (algosToPayOut > 0) {
+    //         transfer(msg.sender, algosToPayOut);
+    //     }
         
-        update_K_target();
-    }
+    //     update_K_target();
+    // }
 
-    /**
-     * @dev Change bond type (DECAY, GAINSONLY, REINVEST)
-     * @param tokenId Bond NFT ID
-     * @param bondType New bond type
-     */
-    function ChangeBondType(uint256 tokenId, AlgoBond.BondReturnsOption bondType) public {
-        require(msg.sender == algoBond.ownerOf(tokenId));
+    // /**
+    //  * @dev Change bond type (DECAY, GAINSONLY, REINVEST)
+    //  * @param tokenId Bond NFT ID
+    //  * @param bondType New bond type
+    //  */
+    // function ChangeBondType(uint256 tokenId, AlgoBond.BondReturnsOption bondType) public {
+    //     require(msg.sender == algoBond.ownerOf(tokenId));
         
-        uint256 algosToPayOut = algoBond.ChangeBondType(tokenId, bondType);
+    //     uint256 algosToPayOut = algoBond.ChangeBondType(tokenId, bondType);
         
-        if (algosToPayOut > 0) {
-            transfer(msg.sender, algosToPayOut);
-        }
+    //     if (algosToPayOut > 0) {
+    //         transfer(msg.sender, algosToPayOut);
+    //     }
         
-        update_K_target();
-    }
+    //     update_K_target();
+    // }
 
-    /**
-     * @dev Update all bond sums - distributes accumulated gains
-     * Can only be called after minimum block delay
-     */
-    function updateBondSums() public {
-        // Set maturity timespan based on bear market length
-        algoBond.setMaturityTimeSpan(f_golden_ratio.mul(bear_actual));
+    // /**
+    //  * @dev Update all bond sums - distributes accumulated gains
+    //  * Can only be called after minimum block delay
+    //  */
+    // function updateBondSums() public {
+    //     // Set maturity timespan based on bear market length
+    //     algoBond.setMaturityTimeSpan(f_golden_ratio.mul(bear_actual));
         
-        // Distribute gains to bond holders
-        algoBond.updateBondSums();
+    //     // Distribute gains to bond holders
+    //     algoBond.updateBondSums();
         
-        update_K_target();
-    }
+    //     update_K_target();
+    // }
 
-    // ============================================
-    // GETTER FUNCTIONS
-    // ============================================
+    // // ============================================
+    // // GETTER FUNCTIONS
+    // // ============================================
     
-    function getBondReturnsOption_Decay() public pure returns (AlgoBond.BondReturnsOption) {
-        return AlgoBond.BondReturnsOption.DECAY;
-    }
+    // function getBondReturnsOption_Decay() public pure returns (AlgoBond.BondReturnsOption) {
+    //     return AlgoBond.BondReturnsOption.DECAY;
+    // }
 
-    function getBondReturnsOption_GainsOnly() public pure returns (AlgoBond.BondReturnsOption) {
-        return AlgoBond.BondReturnsOption.GAINSONLY;
-    }
+    // function getBondReturnsOption_GainsOnly() public pure returns (AlgoBond.BondReturnsOption) {
+    //     return AlgoBond.BondReturnsOption.GAINSONLY;
+    // }
 
-    function getBondReturnsOption_Reinvest() public pure returns (AlgoBond.BondReturnsOption) {
-        return AlgoBond.BondReturnsOption.REINVEST;
-    }
+    // function getBondReturnsOption_Reinvest() public pure returns (AlgoBond.BondReturnsOption) {
+    //     return AlgoBond.BondReturnsOption.REINVEST;
+    // }
 
-    function getMaturityTimeSpan() public view returns (bytes16) {
-        return algoBond.maturityTimeSpan();
-    }
+    // function getMaturityTimeSpan() public view returns (bytes16) {
+    //     return algoBond.maturityTimeSpan();
+    // }
 
-    function _bDelayedSum() public view returns (uint256) {
-        return algoBond._bDelayedSum();
-    }
+    // function _bDelayedSum() public view returns (uint256) {
+    //     return algoBond._bDelayedSum();
+    // }
 
-    function _bDelayedDecaySum() public view returns (uint256) {
-        return algoBond._bDelayedDecaySum();
-    }
+    // function _bDelayedDecaySum() public view returns (uint256) {
+    //     return algoBond._bDelayedDecaySum();
+    // }
 
-    function _bDelayedGainsOnlySum() public view returns (uint256) {
-        return algoBond._bDelayedGainsOnlySum();
-    }
+    // function _bDelayedGainsOnlySum() public view returns (uint256) {
+    //     return algoBond._bDelayedGainsOnlySum();
+    // }
 
-    function _bDelayedReinvestSum() public view returns (uint256) {
-        return algoBond._bDelayedReinvestSum();
-    }
+    // function _bDelayedReinvestSum() public view returns (uint256) {
+    //     return algoBond._bDelayedReinvestSum();
+    // }
 }

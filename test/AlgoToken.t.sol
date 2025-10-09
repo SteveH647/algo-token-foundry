@@ -157,12 +157,19 @@ contract AlgoTokenTest is Test {
             initial_price,
             "Algo Token",
             "AT",
-            "Algo Bond",
-            "AB",
             usdc,
-            0x3ffb851eb851eb851eb851eb851eb852,  // bondPortionAtMaturity = 1/e^2
             216000 // minimum_block_length_between_bondSum_updates_ = 1 month
         );
+
+        algoBond = new AlgoBond(
+            "Algo Bond",
+            "AB",
+            // address(algoToken),  // AlgoToken is the bondManager
+            0x3ffb851eb851eb851eb851eb851eb852  // bondPortionAtMaturity = 1/e^2
+        );
+
+        algoToken.setAlgoBondContract(algoBond);
+        
 
         // Simulate sequence of actions
         uint256 USDC_decimals_scale_factor = 10**usdc.decimals();

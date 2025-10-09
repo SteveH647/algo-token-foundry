@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "abdk/ABDKMathQuad.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
+import "./AlgoToken.sol";
 
 
 /**
@@ -30,6 +31,13 @@ contract AlgoBond is ERC721 {
     // Mathematical constants
     bytes16 f_1 = uint256(1).fromUInt(); // 1.0
     bytes16 f_e = f_1.exp(); // e ≈ 2.718
+
+    // ============================================
+    // EXTERNAL CONTRACTS
+    // ============================================
+
+    // The ERC20 contract of the tokes that can be locked in bonds
+    AlgoToken algoToken;
 
     // ============================================
     // TOKEN OWNERSHIP TRACKING
@@ -187,16 +195,15 @@ contract AlgoBond is ERC721 {
     /**
      * @param name_ NFT collection name
      * @param symbol_ NFT collection symbol
-     * @param bondManager_ Address authorized to mint/burn (AlgoToken contract)
      * @param bondPortionAtMaturity_ Ratio for maturity acceleration
      */
     constructor(
         string memory name_,
         string memory symbol_,
-        address bondManager_,
+        // address bondManager_,
         bytes16 bondPortionAtMaturity_
     ) ERC721 (name_, symbol_) {
-        bondManager = bondManager_;
+        // bondManager = bondManager_;
         
         // Initialize arrays with zero values
         _bSum.push(0);

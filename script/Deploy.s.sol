@@ -19,6 +19,20 @@ contract DeployScript is Script {
         bytes16 k = uint256(1300).fromUInt().div(uint256(1000).fromUInt());
         vm.startBroadcast(deployerPrivateKey);
         
+        // AlgoToken algoToken = new AlgoToken(
+        //     20e6, // ATH_peg_padding
+        //     5.256e6, // bear_current = 2 years
+        //     k,
+        //     1 * 10**usdc.decimals(),
+        //     "Algo Token",
+        //     "AT",
+        //     "Algo Bond",
+        //     "AB",
+        //     usdc, //USDC
+        //     0x3ffb851eb851eb851eb851eb851eb852,  // bondPortionAtMaturity = 1/e^2
+        //     216000 // minimum_block_length_between_bondSum_updates_ = 1 month
+        // );
+
         AlgoToken algoToken = new AlgoToken(
             20e6, // ATH_peg_padding
             5.256e6, // bear_current = 2 years
@@ -26,10 +40,7 @@ contract DeployScript is Script {
             1 * 10**usdc.decimals(),
             "Algo Token",
             "AT",
-            "Algo Bond",
-            "AB",
             usdc, //USDC
-            0x3ffb851eb851eb851eb851eb851eb852,  // bondPortionAtMaturity = 1/e^2
             216000 // minimum_block_length_between_bondSum_updates_ = 1 month
         );
         
