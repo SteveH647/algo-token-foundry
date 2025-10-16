@@ -969,7 +969,7 @@ contract AlgoToken is ERC20 {
      *    However, K_target cannot go below K when adjusting due to bond lockups alone
      * 2. Excessive selling (actual > expected) → K_target forced below K (conservative mode)
      */
-    function update_K_target() private {
+    function update_K_target() public {
         // Calculate expected selloff based on bonds
         total_algos_locked_in_bonds = algoBond.getTotalAlgosLockedInBonds();
         bytes16 f_highest_circ_supply_since_bear_end = highest_circ_supply_since_bear_end.fromUInt();

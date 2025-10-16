@@ -169,7 +169,7 @@ contract AlgoTokenTest is Test {
         );
 
         algoToken.setAlgoBondContract(algoBond);
-        
+        algoBond.setAlgoTokenContract(algoToken);
 
         // Simulate sequence of actions
         uint256 USDC_decimals_scale_factor = 10**usdc.decimals();

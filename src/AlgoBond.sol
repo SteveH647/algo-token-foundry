@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "abdk/ABDKMathQuad.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
@@ -19,7 +20,7 @@ import "./AlgoToken.sol";
  * 
  * Bonds are represented as NFTs for easy transfer and management
  */
-contract AlgoBond is ERC721 {
+contract AlgoBond is ERC721Enumerable {
     using Address for address;
     using Strings for uint256;
     
@@ -36,33 +37,30 @@ contract AlgoBond is ERC721 {
     // EXTERNAL CONTRACTS
     // ============================================
 
-    // The ERC20 contract of the tokes that can be locked in bonds
+    // The ERC20 contract of the tokens that can be locked in bonds
     AlgoToken algoToken;
+
+    // algoToken contract can only be set once
+    bool public algoTokenSet = false;
 
     // ============================================
     // TOKEN OWNERSHIP TRACKING
     // ============================================
     
-    // Token name
-    string private _name;
+    // // Mapping from token ID to owner address
+    // mapping(uint256 => address) private _owners;
     
-    // Token symbol
-    string private _symbol;
+    // // Mapping of owner address to list of token IDs owned
+    // mapping(address => uint256[]) private _tokensOwned;
     
-    // Mapping from token ID to owner address
-    mapping(uint256 => address) private _owners;
+    // // Mapping owner address to token count
+    // mapping(address => uint256) private _balances;
     
-    // Mapping of owner address to list of token IDs owned
-    mapping(address => uint256[]) private _tokensOwned;
+    // // Mapping from token ID to approved address
+    // mapping(uint256 => address) private _tokenApprovals;
     
-    // Mapping owner address to token count
-    mapping(address => uint256) private _balances;
-    
-    // Mapping from token ID to approved address
-    mapping(uint256 => address) private _tokenApprovals;
-    
-    // Mapping from owner to operator approvals
-    mapping(address => mapping(address => bool)) private _operatorApprovals;
+    // // Mapping from owner to operator approvals
+    // mapping(address => mapping(address => bool)) private _operatorApprovals;
 
     // ============================================
     // BOND VALUE TRACKING
@@ -218,6 +216,12 @@ contract AlgoBond is ERC721 {
         _bondPortionAtMaturity = bondPortionAtMaturity_;
     }
 
+    function buyBond(uint256 algoAmount, BondReturnsOption bondType) public {
+        algoToken.transferFrom(msg.sender, address(this), algoAmount);
+        mint(msg.sender, algoAmount, bondType);
+        algoToken.update_K_target();
+    }
+
     // ============================================
     // BOND MINTING FUNCTIONS
     // ============================================
@@ -234,7 +238,6 @@ contract AlgoBond is ERC721 {
         uint256 bondBalance_, 
         BondReturnsOption bondType
     ) public returns(uint256) {
-        require(msg.sender == bondManager, "Sender address must be bond manager");
         return mint(to, bondBalance_, bondBalance_, bondType);
     }
     
@@ -251,8 +254,10 @@ contract AlgoBond is ERC721 {
         uint256 bondBalance_, 
         uint256 originalBondBalance_, 
         BondReturnsOption bondType
-    ) public returns(uint256) {
+    ) internal returns(uint256) {
         require(msg.sender == bondManager, "Sender address must be bond manager");
+
+        algoToken.transferFrom(msg.sender, address(this), bondBalance_);
         
         // Mint the NFT
         _safeMint(to, _currentTokenId);
@@ -260,7 +265,7 @@ contract AlgoBond is ERC721 {
         // Set bond properties
         _bondBalance[_currentTokenId] = bondBalance_;
         _largestBondBalance[_currentTokenId] = originalBondBalance_;
-        _tokensOwned[to].push(_currentTokenId);
+        //_tokensOwned[to].push(_currentTokenId);
         
         // Set update count to next index (gains start from next period)
         _updateCountOfIndividualBond[_currentTokenId] = _sumsIndex + 1;
@@ -289,27 +294,29 @@ contract AlgoBond is ERC721 {
      * @dev Burn a bond NFT and remove its value from sums
      * @param tokenId Bond to burn
      */
-    function burn(uint256 tokenId) public {
+    function burn(uint256 tokenId) internal {
         require(msg.sender == bondManager, "Sender address must be bond manager");
         _burn(tokenId);
         delete _bondBalance[tokenId];
         delete _largestBondBalance[tokenId];
-        deleteTokenOwned(tokenId);
+        delete _bondReturnsOption[tokenId];
+        delete _updateCountOfIndividualBond[tokenId];
+        // deleteTokenOwned(tokenId);
     }
     
     /**
      * @dev Remove token from owner's list
      * @param tokenId Token to remove
      */
-    function deleteTokenOwned(uint256 tokenId) private {
-        bool tokenFound = false;
-        for (uint i = 0; i < _tokensOwned[_owners[tokenId]].length && !tokenFound; i++) {
-            if (_tokensOwned[_owners[tokenId]][i] == tokenId) {
-                delete _tokensOwned[_owners[tokenId]][i];
-                tokenFound = true;
-            }
-        }
-    }
+    // function deleteTokenOwned(uint256 tokenId) private {
+    //     bool tokenFound = false;
+    //     for (uint i = 0; i < _tokensOwned[_owners[tokenId]].length && !tokenFound; i++) {
+    //         if (_tokensOwned[_owners[tokenId]][i] == tokenId) {
+    //             delete _tokensOwned[_owners[tokenId]][i];
+    //             tokenFound = true;
+    //         }
+    //     }
+    // }
 
     /**
      * @dev Add more AlgoTokens to an existing bond
@@ -353,10 +360,10 @@ contract AlgoBond is ERC721 {
      * @dev Set the maturity timespan for bond decay calculations
      * @param mts New maturity timespan in blocks
      */
-    function setMaturityTimeSpan(bytes16 mts) public {
-        require(msg.sender == bondManager, "Sender address must be bond manager");
-        maturityTimeSpan = mts;
-    }
+    // function setMaturityTimeSpan(bytes16 mts) public {
+    //     require(msg.sender == bondManager, "Sender address must be bond manager");
+    //     maturityTimeSpan = mts;
+    // }
 
     /**
      * @dev Update all bond sums with accumulated gains
@@ -394,7 +401,8 @@ contract AlgoBond is ERC721 {
             bytes16 prePayoutDecaySum = bDecaySum_.add(bondGainsDecay);
             
             // Calculate decay factor
-            bytes16 Dt_T = blocksSinceLastUpdate.div(maturityTimeSpan);
+            // bytes16 Dt_T = blocksSinceLastUpdate.div(maturityTimeSpan);
+            bytes16 Dt_T = blocksSinceLastUpdate.div(algoToken.bear_actual());
             bytes16 e_dt_T = Dt_T.neg().exp();
             
             // New sum after decay
@@ -450,7 +458,7 @@ contract AlgoBond is ERC721 {
      * @return Total payout amount
      */
     function updateBond(uint256 tokenId) public returns (uint256) {
-        require(msg.sender == bondManager, "Sender address must be bond manager");
+        require(msg.sender == ownerOf(tokenId));
         
         uint256 updateCount = _updateCountOfIndividualBond[tokenId];
         uint256 payout = 0;
@@ -503,6 +511,12 @@ contract AlgoBond is ERC721 {
             _bondBalance[tokenId] = newBondBalance;
             _updateCountOfIndividualBond[tokenId] = _sumsIndex;
         }
+
+        if (payout > 0) {
+            algoToken.transfer(msg.sender, payout);
+        }
+
+        algoToken.update_K_target();
         
         return payout;
     }
@@ -514,15 +528,16 @@ contract AlgoBond is ERC721 {
      * @return Payout from required update
      */
     function ChangeBondType(uint256 tokenId, BondReturnsOption toBondType) public returns (uint256) {
-        require(msg.sender == bondManager, "Sender address must be bond manager");
-        require(_exists(tokenId));
+        // require(_exists(tokenId));
+        _requireOwned(tokenId);
+        require(msg.sender == ownerOf(tokenId));
         
         // Must update bond before changing type
         uint256 payout = updateBond(tokenId);
         
         // Change the type
         _bondReturnsOption[tokenId] = toBondType;
-        
+
         return payout;
     }
 
@@ -566,10 +581,16 @@ contract AlgoBond is ERC721 {
         return _bSum[_bSum.length - 1] + _bDelayedSum + bGainsAccrual;
     }
 
-    /**
-     * @dev Returns whether `tokenId` exists.
-     */
-    function _exists(uint256 tokenId) internal view returns (bool) {
-        return _owners[tokenId] != address(0);
+    // /**
+    //  * @dev Returns whether `tokenId` exists.
+    //  */
+    // function _exists(uint256 tokenId) internal view returns (bool) {
+    //     return _owners[tokenId] != address(0);
+    // }
+
+    function setAlgoTokenContract(AlgoToken algoToken_) external {
+        require(!algoTokenSet, "AlgoToken already set");
+        algoToken = algoToken_;
+        algoTokenSet = true;
     }
 }
